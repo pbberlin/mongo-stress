@@ -12,7 +12,7 @@ import (
 
 
 var   deadPeriods int = 0
-const deadPeriodsMax int = 10
+const deadPeriodsMax int = 310
 
 func main(){
 
@@ -30,7 +30,7 @@ func main(){
 	
 
 	// Connect to server.
-	    conn, err := mongo.Dial("localhost:27002")
+	    conn, err := mongo.Dial("localhost:27003")
 	//  conn, err := mongo.Dial("sx122:27017")
 
 	if err != nil {
@@ -47,23 +47,16 @@ func main(){
 	log.SetFlags(0)
 
 	//reset(conn)
-
-
 	//chapter1(conn)
 
 
 	log.Println("\n\n==connect_to_oplog==")
 	
-	//cursor, err := conn.query("local.oplog.rs", query, 0, 0, 0, QueryOption_CursorTailable | QueryOption_AwaitData);
-	//cursor, err := unicorns.Find(nil).Cursor()
-
-	//cursor, err := local.oplog.rs("local.oplog.rs", query, 0, 0, 0, QueryOption_CursorTailable | QueryOption_AwaitData);
-
 	db := mongo.Database{conn, "local", mongo.DefaultLastErrorCmd}	// Create a database object.
 	oplog := db.C("oplog.rs")  // create collection
 
-	//cursor, err := oplog.Find(nil).Tailable(true).AwaitData(true).Limit(4).Skip(2).Cursor()
-	cursor, err := oplog.Find(nil).Tailable(true).Limit(4).Skip(2).Cursor()
+	// Limit(4).Skip(2) and skip are ignored for tailable cursors
+	cursor, err := oplog.Find(nil).Tailable(true).Limit(4).Skip(2).Sort( mongo.D{{"$natural", 1}} ).Cursor()
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -74,6 +67,7 @@ func main(){
 
 
 func iterateCursorTail( c mongo.Cursor ){
+
 	//checkCursor(c)
 	//for c.HasNext() {
 	for {
@@ -83,15 +77,16 @@ func iterateCursorTail( c mongo.Cursor ){
 			log.Println(err, fmt.Sprint(err) )
 		}
 		printMap(m,true)
+
+
 		if doBreak := checkCursor(c); doBreak {
 			break
 		}
 	}
+
 }
 
-func checkCursor( c mongo.Cursor  )( doBreak bool ){
-
-	doBreak = false
+func checkCursor( c mongo.Cursor  )  bool {
 
 	dead :=  c.GetId()
 
@@ -110,7 +105,7 @@ func checkCursor( c mongo.Cursor  )( doBreak bool ){
 		log.Println( fmt.Sprintf( "periods %v of %v - going to sleep ", deadPeriods, deadPeriodsMax) )
 		if deadPeriods > deadPeriodsMax {
 			doBreak = true
-			return
+			return true
 		}
 		time.Sleep( 1200 * time.Millisecond)
 	}
@@ -120,7 +115,7 @@ func checkCursor( c mongo.Cursor  )( doBreak bool ){
 		log.Println( fmt.Sprint( "cursor.Err() says ", err) )
 		log.Fatal(   fmt.Sprint( "cursor.Err() says ", err) )
 	}
-	return
+	return false
 
 }
 
