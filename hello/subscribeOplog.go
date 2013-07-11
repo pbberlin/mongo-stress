@@ -7,18 +7,23 @@ import (
 	"log"
 	"time"
 	"math"
-	_ "os"
+	"strings"
+//	_ "os"
 )
 
-
 var   askedCursor    int = 0
-const askCursorMax int = 310
+const askCursorMax   int = 400 
 
 
-const changelogDb  string = "learn"
+const changelogDb  string = "offer-db"
 const changelogCol string = "oplog.subscription"
 var   changelogPath = fmt.Sprint( changelogDb , "." , changelogCol )
+const offers = "offers.test"
 var   sixtyMongoSecondsEarlier mongo.Timestamp = mongo.Timestamp(5898548092499667758)	// limit timestamp
+
+
+//var cq chan int = make(chan,0)
+var cq chan int = make(chan int)
 
 
 /*
@@ -26,8 +31,6 @@ this is a go implementation of a tailable cursor against the oplog
 as describe at the bottom of this document: 
 	http://docs.mongodb.org/manual/tutorial/create-tailable-cursor/
 */
-
-
 func getConn() mongo.Conn {
 
 	conn, err := mongo.Dial("localhost:27003")
@@ -51,17 +54,17 @@ func main(){
 	log.SetFlags(0)
 
 
-	//reset(conn)
+	//clearAll(conn)
 
 
-	db1    := mongo.Database{conn, changelogDb, mongo.DefaultLastErrorCmd}	// get a database object
-	CchangelogCol := db1.C(changelogCol)  // get collection
-
-	n, errCl := CchangelogCol.Find(nil).Count()
-	if n>0  || errCl != nil {
-		fmt.Println("capped oplog ",changelogPath,"already exists")
+	// create a capped collection if it is empty
+	dbChangeLog  := mongo.Database{conn, changelogDb, mongo.DefaultLastErrorCmd}	// get a database object
+	colChangeLog := dbChangeLog.C(changelogCol)  
+	n, _ := colChangeLog.Find(nil).Count()
+	if n>0   {
+		fmt.Println("capped oplog ",changelogPath,"already exists. Entries: ", n)
 	} else {
-		err1 := db1.Run(
+		err1 := dbChangeLog.Run(
 			mongo.D{
 				{"create", fmt.Sprint( changelogCol ) },
 				{"capped", true},
@@ -75,11 +78,11 @@ func main(){
 			fmt.Println("capped oplog ",changelogPath,"created")
 		}
 	}
-		
+
 
 	log.Println("\n\n==connect_to_oplog==")
-	db2    := mongo.Database{conn, "local", mongo.DefaultLastErrorCmd}	// get a database object
-	oplog := db2.C("oplog.rs")  // get collection
+	dbOplog  := mongo.Database{conn, "local", mongo.DefaultLastErrorCmd}	// get a database object
+	oplog    := dbOplog.C("oplog.rs")  // get collection
 
 
 	// Limit(4).Skip(2) and skip are ignored for tailable cursors
@@ -88,7 +91,7 @@ func main(){
 
 
 	// if no timestamp is available, we could query for BSON.minKey constant 
-	// in mongo according to http://docs.mongodb.org/manual/reference/operator/type/ 
+	// as described here http://docs.mongodb.org/manual/reference/operator/type/ 
 	// but no worki 
 	/*
 	cursor, err := oplog.Find( mongo.M{"ts": mongo.M{ "$type":-1}  }  ).Tailable(true).AwaitData(true).Sort( mongo.D{{"$natural", 1}} ).Cursor()
@@ -98,10 +101,9 @@ func main(){
 	*/
 
 
-
-	// instead, we start at certain timestamp
+	// instead, we start at some recent timestamp
 	// and demand natural sort (default anyway?)
-
+	// 	this can be time consuming
 	sixtySecondsEarlier := int32(time.Now().Unix()) - 10*60
 	fmt.Println(sixtySecondsEarlier )
 	// make a mongo/bson timestamp from the unix timestamp
@@ -119,18 +121,39 @@ func main(){
 	}
 
 
-	iterateTailCursor(cursor)
+	go iterateTailCursor(cursor,colChangeLog)
+	go fill()
+	x := <- cq
+	fmt.Println("quit signal received: ", x)
 
 }
 
 
-func iterateTailCursor( c mongo.Cursor ){
+func fill(){
 
-	conn1 := getConn()
-	defer conn1.Close()
-	dbInsert := mongo.Database{conn1, changelogDb, mongo.DefaultLastErrorCmd}	// Create a database access object.
-	oplogsubscription := dbInsert.C( changelogCol )  // create collection access object
+	conn := getConn()
+	defer conn.Close()
+	dbChangeLog  := mongo.Database{conn, changelogDb, mongo.DefaultLastErrorCmd}	// get a database object
+	colOffers := dbChangeLog.C(offers)  
+	
+	for i:=0 ; i < 100; i++ {
+		err := colOffers.Insert(mongo.M{"offerId": i,
+			 "shopId"     : 20, 
+			 "lastSeen"   : int32(time.Now().Unix()) ,
+			 "categoryId" : 15 ,
+			 "title":       fmt.Sprint("title",i) ,
+			 "description": strings.Repeat( fmt.Sprint("description",i), 100),
+		})
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
+	
 
+	
+}
+
+func iterateTailCursor( c mongo.Cursor, oplogsubscription mongo.Collection ){
 
 	//checkCursor(c)
 	//for c.HasNext() {
@@ -190,7 +213,13 @@ func iterateTailCursor( c mongo.Cursor ){
 					fmt.Printf(" m[\"o\"] No object map (delete op) \n")
 				}
 
-				err := oplogsubscription.Insert(mongo.M{"ts": sixtyMongoSecondsEarlier , "operation": m["op"], "oid" : oid , "ns": ns})
+				err := oplogsubscription.Insert(mongo.M{"ts": sixtyMongoSecondsEarlier ,
+					 "operation": m["op"], 
+					 "oid" : oid ,
+					  "ns": ns,
+					  "del": "\n",
+					  "im": innerMap,
+				})
 				if err != nil {
 					log.Fatal(err)
 				}
@@ -213,6 +242,10 @@ func iterateTailCursor( c mongo.Cursor ){
 
 
 	}
+	fmt.Println(" sending quit signal: ", 1)
+	cq <- 1
+	//panic("show")
+	
 
 }
 
@@ -249,7 +282,7 @@ func checkCursor( c mongo.Cursor  ) ( bool,bool ){
 		if askedCursor > askCursorMax {
 			return true, false
 		}
-		time.Sleep( 1200 * time.Millisecond)
+		time.Sleep( 400 * time.Millisecond)
 	}
 
 
@@ -298,15 +331,13 @@ func printMap( m mongo.M, short bool ){
 
 
 
-// reset cleans up after previous runs of this applications.
-func reset(conn mongo.Conn) {
+// clearAll cleans up after previous runs of this applications.
+func clearAll(conn mongo.Conn) {
 	log.Print("\n\n== Clear documents and indexes created by previous run. ==\n")
-	db := mongo.Database{conn, "learn", mongo.DefaultLastErrorCmd}
+	db := mongo.Database{conn, changelogDb, mongo.DefaultLastErrorCmd}
 	db.Run(mongo.D{{"profile", 0}}, nil)
-	db.C("unicorns").Remove(nil)
-	db.C("hits").Remove(nil)
-	db.Run(mongo.D{{"dropIndexes", "unicorns"}, {"index", "*"}}, nil)
-	db.Run(mongo.D{{"dropIndexes", "hits"}, {"index", "*"}}, nil)
+	db.C(offers).Remove(nil)
+	db.Run(mongo.D{{"dropIndexes", offers}, {"index", "*"}}, nil)
 }
 
 
