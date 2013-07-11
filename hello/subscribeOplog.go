@@ -122,21 +122,23 @@ func main(){
 
 
 	go iterateTailCursor(cursor,colChangeLog)
-	go fill()
+	go fill(1000)
+	go fill(1200)
+	go fill(1400)
 	x := <- cq
 	fmt.Println("quit signal received: ", x)
 
 }
 
 
-func fill(){
+func fill(start int){
 
 	conn := getConn()
 	defer conn.Close()
 	dbChangeLog  := mongo.Database{conn, changelogDb, mongo.DefaultLastErrorCmd}	// get a database object
 	colOffers := dbChangeLog.C(offers)  
 	
-	for i:=0 ; i < 100; i++ {
+	for i:=start ; i < 100; i++ {
 		err := colOffers.Insert(mongo.M{"offerId": i,
 			 "shopId"     : 20, 
 			 "lastSeen"   : int32(time.Now().Unix()) ,
