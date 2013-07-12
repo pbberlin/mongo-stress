@@ -1,6 +1,5 @@
 package main
 
-import "fmt"
 
 import (
 	"github.com/garyburd/go-mongo/mongo"
@@ -8,12 +7,18 @@ import (
 	"time"
 	"math"
 	"strings"
+	"fmt"
 //	_ "os"
 )
 
 var   askedCursor    int = 0
-const askCursorMax   int = 400 
+const askCursorMax   int = 4 
+const secondsPast = 2
 
+const insertThreads     = 8
+const insertsPerThread  = int64(2000)  // "cursor not found"
+
+const outputLevel = 0
 
 const changelogDb  string = "offer-db"
 const changelogCol string = "oplog.subscription"
@@ -68,7 +73,7 @@ func main(){
 			mongo.D{
 				{"create", fmt.Sprint( changelogCol ) },
 				{"capped", true},
-				{"size", 1024 },
+				{"size", 1024*1024 },
 			},
 			nil,
 		)
@@ -104,7 +109,7 @@ func main(){
 	// instead, we start at some recent timestamp
 	// and demand natural sort (default anyway?)
 	// 	this can be time consuming
-	sixtySecondsEarlier := int32(time.Now().Unix()) - 10*60
+	sixtySecondsEarlier := int32(time.Now().Unix()) - secondsPast
 	fmt.Println(sixtySecondsEarlier )
 	// make a mongo/bson timestamp from the unix timestamp
 	//		according to http://docs.mongodb.org/manual/core/document/
@@ -120,25 +125,39 @@ func main(){
 		log.Fatal(err)
 	}
 
-
 	go iterateTailCursor(cursor,colChangeLog)
-	go fill(1000)
-	go fill(1200)
-	go fill(1400)
+
+	const layout2 = "15:04 05"
+	const layout3 = " 05.0 "
+	// http://digital.ni.com/public.nsf/allkb/A98D197224CB83B486256BC100765C4B
+	fmt.Print(time.Now().Format( layout3 ) )
+	ctick := time.Tick(1 * time.Second)
+	go func() { 
+		for now := range ctick {
+			fmt.Print(now.Format( layout3 ) )
+		}
+	}()
+
+	for i:=int64(0); i< insertThreads; i++ {
+		go fill( int64(time.Now().Unix() )<<32  +  i*insertsPerThread )
+	}
 	x := <- cq
 	fmt.Println("quit signal received: ", x)
 
 }
 
 
-func fill(start int){
+func fill(start int64){
+
+	fctGetRecurseMsg := getRecurseMsg( fmt.Sprint("fill",start," "))
 
 	conn := getConn()
 	defer conn.Close()
 	dbChangeLog  := mongo.Database{conn, changelogDb, mongo.DefaultLastErrorCmd}	// get a database object
 	colOffers := dbChangeLog.C(offers)  
 	
-	for i:=start ; i < 100; i++ {
+	for i:=start ; i < start+insertsPerThread; i++ {
+		
 		err := colOffers.Insert(mongo.M{"offerId": i,
 			 "shopId"     : 20, 
 			 "lastSeen"   : int32(time.Now().Unix()) ,
@@ -149,6 +168,8 @@ func fill(start int){
 		if err != nil {
 			log.Fatal(err)
 		}
+		fmt.Print( fctGetRecurseMsg() )
+
 	}
 	
 
@@ -157,6 +178,8 @@ func fill(start int){
 
 func iterateTailCursor( c mongo.Cursor, oplogsubscription mongo.Collection ){
 
+
+	fctGetRecurseMsg := getRecurseMsg("recursion ")
 	//checkCursor(c)
 	//for c.HasNext() {
 	for {
@@ -203,12 +226,6 @@ func iterateTailCursor( c mongo.Cursor, oplogsubscription mongo.Collection ){
 							log.Fatal(err)
 						}
 
-						/*
-						tmp,ok  := moo["insertDate"].(string)
-						if ok {
-							lastInsert = tmp
-						}
-						*/
 					}
 
 				} else {
@@ -216,27 +233,25 @@ func iterateTailCursor( c mongo.Cursor, oplogsubscription mongo.Collection ){
 				}
 
 				err := oplogsubscription.Insert(mongo.M{"ts": sixtyMongoSecondsEarlier ,
-					 "operation": m["op"], 
-					 "oid" : oid ,
+					  "operation": m["op"], 
+					  "oid" : oid ,
 					  "ns": ns,
-					  "del": "\n",
 					  "im": innerMap,
 				})
 				if err != nil {
 					log.Fatal(err)
 				}
 
-				fmt.Print("  ")
-
+				printMap(m,true,"   ")
 
 
 			} else {
-				fmt.Print("      recurs. ")
+				//fmt.Print(" recurs.")
+				fmt.Print( fctGetRecurseMsg() )
+				
 			}
-			printMap(m,true)
 			if innerMap != nil { 
-				fmt.Print("    inner map: ")
-				printMap(innerMap,true) 
+				printMap(innerMap,true,"      inner map: ") 
 			}
 
 
@@ -289,7 +304,7 @@ func checkCursor( c mongo.Cursor  ) ( bool,bool ){
 
 
 	if err := c.Err(); err != nil {
-		log.Fatal(   fmt.Sprint( "cursor.Err() says ", err) )
+		log.Fatal(   fmt.Sprint( "mongo permanent cursor error: ", err) )
 	}
 
 	return false, hasNext
@@ -308,29 +323,66 @@ func iterateCursor(c mongo.Cursor ){
 		if err != nil {
 			log.Fatal(err)
 		}
-		printMap(m, false)
+		printMap(m, false,"")
 	}
 }
 
 /*
 	boring little helper
 */
-func printMap( m mongo.M, short bool ){
+func printMap( m mongo.M, short bool, prefix string ){
 
+	if outputLevel < 2 {
+		return	
+	}
+	
 	if short {
 		ms := fmt.Sprintf("%+v",m)
 		ms2:=ms[0: int(math.Min(120,float64(len(ms))))]
-		log.Println( ms2 )
+		log.Println( prefix, ms2 )
 	} else {
 		log.Println( m )
 		for k,v := range m {
-			log.Printf("\tk: %v \t\t: %v \n", k,v )
+			log.Printf("%v\tk: %v \t\t: %v \n", prefix ,k,v )
 		}
 
 	}
 }
 
 
+
+func getRecurseMsg(cmsg string) func() string {
+
+    ctr := 0
+
+    var cmsgl int = len(cmsg)
+    msg := ""
+    csr := 0
+
+    return func() string {
+
+    		ctr++
+    		if mod := ctr % 50; mod != 0{
+    			return ""	
+    		}
+
+		    if  len(msg) >= len(cmsg) {
+		    	msg = ""
+		    }
+    		xlen := len(msg)
+    		ylen := len(msg)+1
+        msg = fmt.Sprint(msg, cmsg[xlen:ylen])
+        
+		    if  csr >= cmsgl {
+		    	csr = 0
+		    }
+        msg = fmt.Sprint("", cmsg[csr:csr+1])
+		    csr++
+
+        return fmt.Sprint(msg)
+        return fmt.Sprint(ctr, msg,"-",csr,"-",csr+1,"-\n")
+    }
+}
 
 
 // clearAll cleans up after previous runs of this applications.
