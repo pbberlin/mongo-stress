@@ -13,7 +13,8 @@ import (
 
 var   countNoNextValue  int = 0
 const noNextValueMax    int = 2 
-const secondsPast = 2
+
+const secondsDefer = 2					// upon cursor not found error - amount of sleep  - 
 
 const insertThreads     = 8
 const insertsPerThread  = int64(2000)  // "cursor not found"
@@ -164,7 +165,7 @@ func iterateTailCursor( c mongo.Cursor, oplogsubscription mongo.Collection , opl
 
 		if doBreak {
 
-			time.Sleep( 400 * time.Millisecond )
+			time.Sleep( secondsDefer * time.Second )
 			
 			if countNoNextValue < noNextValueMax {
 				c = recoverTailableCursor()
@@ -429,7 +430,7 @@ func getTailableCursor( oplog mongo.Collection ) mongo.Cursor  {
 	// instead, we start at some recent timestamp
 	// and demand natural sort (default anyway?)
 	// 	this can be time consuming
-	sixtySecondsEarlier := int32(time.Now().Unix()) - secondsPast
+	sixtySecondsEarlier := int32(time.Now().Unix()) - secondsDefer - (20*time.Millisecond)
 	//log.Println(sixtySecondsEarlier )
 	// make a mongo/bson timestamp from the unix timestamp
 	//		according to http://docs.mongodb.org/manual/core/document/
