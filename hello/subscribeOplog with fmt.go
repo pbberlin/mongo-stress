@@ -12,7 +12,7 @@ import (
 )
 
 var   countNoNextValue  int = 0
-const noNextValueMax    int = 2 
+const noNextValueMax    int = 4 
 const secondsPast = 2
 
 const insertThreads     = 8
@@ -29,13 +29,9 @@ const offers = "offers.test"
 var   sixtyMongoSecondsEarlier mongo.Timestamp = mongo.Timestamp(5898548092499667758)	// limit timestamp
 
 
-var cq  chan int     = make(chan   int   )        // channel quit
-var chl chan []int64 = make(chan []int64 ,1)			// channel load
-var arrayLoadTotal = make([]int64 ,insertThreads)
-var loadTotal = int64(0)
-
-var cht chan int64   = make(chan   int64 ,1)      // channel cursor tail
-var tailTotal = int64(0)
+var cq chan int = make(chan int) // channel quit
+var chl chan []int = make(chan []int )			// channel load
+var cht chan map[string]int = make(chan map[string]int,1)   // channel cursor tail
 
 
 /*
@@ -57,6 +53,8 @@ func getConn() mongo.Conn {
 
 func main(){
 
+
+
 	conn := getConn()
 	defer conn.Close()
 
@@ -75,51 +73,45 @@ func main(){
 	cursor := getTailableCursor(oplog)
 	colChangeLog, colCounterChangeLog := ensureChangeLogExists(conn)
 
+
 	go iterateTailCursor(cursor,colChangeLog, colCounterChangeLog)
 
-	for i:= 0; i< insertThreads; i++ {
-		batchStamp := int64(time.Now().Unix() )<<32  +  int64(i)*insertsPerThread
-		go fill( i, batchStamp)
+	for i:=int64(0); i< insertThreads; i++ {
+		go fill( int64(time.Now().Unix() )<<32  +  i*insertsPerThread, i )
 	}
 	
-	arrayLoad := make( []int64, insertThreads )
+	arrayLoad := make( []int, insertThreads )
 	chl <- arrayLoad
-	cht <- int64(0)
 	
 	
 	x := <- cq
-	log.Println("quit signal received: ", x)
+	fmt.Println("quit signal received: ", x)
 
 
 
 	arrayLoad, ok := (<- chl)
 	if ok {
-		for k,_ := range arrayLoad {
-			v2 := arrayLoadTotal[k]
-			loadTotal += v2
-			log.Printf("thread %v - load ops %v - ", k , v2)			
+		for k,v := range arrayLoad {
+			fmt.Printf("thread %v - load ops %v - ", k , v)			
 		}
+		fmt.Println("")
 	} else {
 		log.Fatal("error reading from chl 1")
 	}
-	var quote float64 = float64(tailTotal)/float64(loadTotal)
-	quote = math.Trunc(quote*1000)/10
-	log.Print("==================================================")
-	log.Printf("Loaded-Tailed: %v - %v - %v percent",loadTotal,tailTotal,quote)
 
 }
 
 
-func fill(idxThread int , batchStamp int64){
+func fill(start int64, idxThread int64 ){
 
-	fctGetRecurseMsg := getRecurseMsg( fmt.Sprint("fill",idxThread," "))
+	//fctGetRecurseMsg := getRecurseMsg( fmt.Sprint("fill",idxThread," "))
 
 	conn := getConn()
 	defer conn.Close()
 	dbChangeLog  := mongo.Database{conn, changelogDb, mongo.DefaultLastErrorCmd}	// get a database object
 	colOffers := dbChangeLog.C(offers)  
 	
-	for i:=batchStamp ; i < batchStamp+insertsPerThread; i++ {
+	for i:=start ; i < start+insertsPerThread; i++ {
 		
 		err := colOffers.Insert(mongo.M{"offerId": i,
 			 "shopId"     : 20, 
@@ -132,11 +124,11 @@ func fill(idxThread int , batchStamp int64){
 			log.Println(   fmt.Sprint( "mongo fill error: ", err,"\n") )		
 			log.Fatal(err)
 		}
-		log.Print( fctGetRecurseMsg() )
+		//fmt.Print( fctGetRecurseMsg() )
 
 		const chunkSize = 100
-		if (i+1) % chunkSize == 0 {
-			//log.Print( "|" )		
+		if i % chunkSize == 0 {
+			//fmt.Print( "|" )		
 			arrayLoad, ok := (<- chl)
 			if ok {
 				arrayLoad[idxThread] += chunkSize
@@ -147,7 +139,9 @@ func fill(idxThread int , batchStamp int64){
 		}
 		
 	}
-	fmt.Print(" -fill",idxThread," finished- ")
+
+
+	fmt.Println("\nfill",idxThread," finished")
 	
 }
 
@@ -156,7 +150,7 @@ func iterateTailCursor( c mongo.Cursor, oplogsubscription mongo.Collection , opl
 
 	fctGetRecurseMsg := getRecurseMsg("recursion ")
 	//checkCursor(c)
-	
+	//for c.HasNext() {
 	for {
 		
 		doBreak, hasNext := checkCursor(c)
@@ -170,7 +164,7 @@ func iterateTailCursor( c mongo.Cursor, oplogsubscription mongo.Collection , opl
 				c = recoverTailableCursor()
 				doBreak, _ := checkCursor(c)
 				if doBreak {
-					log.Println("second failure")
+					fmt.Println("second failure")
 					break
 				}
 			} else {
@@ -187,16 +181,15 @@ func iterateTailCursor( c mongo.Cursor, oplogsubscription mongo.Collection , opl
 			}
 
 			if  m["ts"] == nil {
-				log.Println("no timestamp")
+				fmt.Println("no timestamp")
 			}
 
 			var innerMap mongo.M = nil
 
 			ns := m["ns"].(string) 
-			//log.Printf("%+v %T -  vs. %v\n",ns, ns, changelogPath)
+			//fmt.Printf("%+v %T -  vs. %v\n",ns, ns, changelogPath)
 
 			if   ! strings.HasPrefix( ns ,changelogPath)  {
-
 
 				sixtyMongoSecondsEarlier = m["ts"].(mongo.Timestamp)
 				var oid mongo.ObjectId = mongo.ObjectId("51dc1b9d419c")  // 12 chars
@@ -218,7 +211,7 @@ func iterateTailCursor( c mongo.Cursor, oplogsubscription mongo.Collection , opl
 					}
 
 				} else {
-					log.Printf(" m[\"o\"] No object map (delete op) \n")
+					fmt.Printf(" m[\"o\"] No object map (delete op) \n")
 				}
 
 				err := oplogsubscription.Insert(mongo.M{"ts": sixtyMongoSecondsEarlier ,
@@ -233,15 +226,60 @@ func iterateTailCursor( c mongo.Cursor, oplogsubscription mongo.Collection , opl
 				printMap(m,true,"   ")
 
 
-				incTailCounter()
 				errCounter := oplogSubscriptionCounter.Update( mongo.M{"counter": mongo.M{"$exists": true}, } , mongo.M{"$inc"   : mongo.M{"counter": 1} } ,)
 				if errCounter != nil {
 					log.Fatal("lf12 ",errCounter)
 				}
 
 
+
+				const chunkSize = 100
+				if i % chunkSize == 0 {
+					//fmt.Print( "|" )		
+					arrayLoad, ok := (<- chl)
+					if ok {
+						arrayLoad[idxThread] += chunkSize
+						for k,v := range arrayLoad {
+							
+						}
+						arrayLoadNew := make( []int, insertThreads )
+						chl <- arrayLoadNew
+
+					} else {
+						log.Fatal("error reading from chl 3")
+					}
+				}
+
+
+				select {
+					case monData,ok := (<- cht) :
+						if ok {
+							//print("received \n")
+						} else {
+							print("cht is closed\n")
+						}						
+						ix := monData["cntr"]
+						//fmt.Println("producer: read - write", ix)
+						ix++
+						monData["cntr"] = ix
+						cht  <- monData
+					default: 
+						//fmt.Println("producer: noop")
+						//fmt.Println("producer: write a")
+						monData := map[string]int{
+						    "cntr": 1,
+						}
+						//fmt.Println("producer: write b")
+						cht<-monData
+						//fmt.Print("reset cntr")
+				}				
+
+
+
 			} else {
+				//fmt.Print(" recurs.")
 				fmt.Print( fctGetRecurseMsg() )
+				
 			}
 			if innerMap != nil { 
 				printMap(innerMap,true,"      inner map: ") 
@@ -252,7 +290,7 @@ func iterateTailCursor( c mongo.Cursor, oplogsubscription mongo.Collection , opl
 
 
 	}
-	log.Println(" sending quit signal: ", 1)
+	fmt.Println(" sending quit signal: ", 1)
 	cq <- 1
 	//panic("show")
 	
@@ -287,14 +325,11 @@ func checkCursor( c mongo.Cursor  ) ( bool,bool ){
 			log.Println( fmt.Sprintf( "dead cursor id is %v - going to sleep\n", alive))
 		}
 
-		log.Println( fmt.Sprintf( "await over - no next value no. %v of %v - going to sleep\n", countNoNextValue, noNextValueMax) )
-
 		countNoNextValue++
+		log.Println( fmt.Sprintf( "await over - no next value no. %v of %v - going to sleep\n", countNoNextValue, noNextValueMax) )
 		if countNoNextValue > noNextValueMax {
 			return true, false
 		}
-
-
 	}
 
 
@@ -348,7 +383,6 @@ func printMap( m mongo.M, short bool, prefix string ){
 
 
 func getRecurseMsg(cmsg string) func() string {
-	
 
     ctr := 0
 
@@ -376,7 +410,6 @@ func getRecurseMsg(cmsg string) func() string {
         msg = fmt.Sprint("", cmsg[csr:csr+1])
 		    csr++
 
-				return ""
         return fmt.Sprint(msg)
         return fmt.Sprint(ctr, msg,"-",csr,"-",csr+1,"-\n")
     }
@@ -391,7 +424,6 @@ func clearAll(conn mongo.Conn) {
 	db.C(offers).Remove(nil)
 	db.Run(mongo.D{{"dropIndexes", offers}, {"index", "*"}}, nil)
 }
-
 
 
 func getOplogCollection(conn mongo.Conn, colName string) mongo.Collection {
@@ -415,6 +447,7 @@ func getTailableCursor( oplog mongo.Collection ) mongo.Cursor  {
 	// most basic query would be
 	// cursor, err := oplog.Find(nil).Tailable(true).AwaitData(true).Cursor()
 
+
 	// if no timestamp is available, we could query for BSON.minKey constant 
 	// as described here http://docs.mongodb.org/manual/reference/operator/type/ 
 	// but no worki 
@@ -430,15 +463,15 @@ func getTailableCursor( oplog mongo.Collection ) mongo.Cursor  {
 	// and demand natural sort (default anyway?)
 	// 	this can be time consuming
 	sixtySecondsEarlier := int32(time.Now().Unix()) - secondsPast
-	//log.Println(sixtySecondsEarlier )
+	//fmt.Println(sixtySecondsEarlier )
 	// make a mongo/bson timestamp from the unix timestamp
 	//		according to http://docs.mongodb.org/manual/core/document/
 	var sixtyInt64SecondsEarlier int64 = int64(sixtySecondsEarlier) << 32
-	//log.Println(sixtyInt64SecondsEarlier)
+	//fmt.Println(sixtyInt64SecondsEarlier)
 
 	sixtyMongoSecondsEarlier = mongo.Timestamp(5898932101230624778)		// example
 	sixtyMongoSecondsEarlier = mongo.Timestamp(sixtyInt64SecondsEarlier)
-	//log.Println(sixtyMongoSecondsEarlier)
+	//fmt.Println(sixtyMongoSecondsEarlier)
 
 	cursor, err := oplog.Find( mongo.M{"ts": mongo.M{ "$gte":sixtyMongoSecondsEarlier}  }  ).Tailable(true).AwaitData(true).Sort( mongo.D{{"$natural", 1}} ).Cursor()
 	if err != nil {
@@ -452,7 +485,6 @@ func getTailableCursor( oplog mongo.Collection ) mongo.Cursor  {
 }
 
 
-
 func ensureChangeLogExists(conn mongo.Conn) (mongo.Collection, mongo.Collection){
 	
 	// create a capped collection if it is empty
@@ -460,7 +492,7 @@ func ensureChangeLogExists(conn mongo.Conn) (mongo.Collection, mongo.Collection)
 	colChangeLog := dbChangeLog.C(changelogCol)  
 	n, _ := colChangeLog.Find(nil).Count()
 	if n>0   {
-		log.Println("capped oplog ",changelogPath,"already exists. Entries: ", n)
+		fmt.Println("capped oplog ",changelogPath,"already exists. Entries: ", n)
 	} else {
 		errCreate := dbChangeLog.Run(
 			mongo.D{
@@ -473,7 +505,7 @@ func ensureChangeLogExists(conn mongo.Conn) (mongo.Collection, mongo.Collection)
 		if errCreate != nil {
 			log.Fatal(errCreate)
 		} else {
-			log.Println("capped oplog ",changelogPath,"created")
+			fmt.Println("capped oplog ",changelogPath,"created")
 		}
 	}
 	colChangelogCounter := dbChangeLog.C(counterChangeLogCol)  
@@ -481,10 +513,12 @@ func ensureChangeLogExists(conn mongo.Conn) (mongo.Collection, mongo.Collection)
 	if errCounter != nil {
 		log.Fatal("lf11 ",errCounter)
 	}
+
+	
 	return colChangeLog, colChangelogCounter
 	
+	
 }
-
 
 func startTimerLog(){
 	
@@ -495,16 +529,45 @@ func startTimerLog(){
 	// http://digital.ni.com/public.nsf/allkb/A98D197224CB83B486256BC100765C4B
 
 	timeStart := time.Now()
-	log.Print( timeStart.Format( layout3 ) )
+	fmt.Print( timeStart.Format( layout3 ) )
 	ctick := time.Tick(millisecs * time.Millisecond)
 
 
 	go func() { 
 		for now := range ctick {
 
-			writeLoadInfo()
-			writeTailInfo(now,timeStart, float64(millisecs))
 
+			var ix int = 0
+			//fmt.Println("consume0")
+			select {
+				
+				case monData,_ := (<- cht) : 
+					ix = monData["cntr"]
+					//fmt.Println("consume1",ok)
+		
+				
+				default: 
+					ix = 0
+					//fmt.Println("consume2")
+			}				
+			//fmt.Println("consume3")
+
+
+			//fmt.Print( now.Sub(timeStart).Format( layout3 ), ix/ ( 1000/millisecs) )
+			strSeconds := fmt.Sprint( now.Sub(timeStart).Seconds() )
+			strSeconds2:=strSeconds[0:4]
+
+			strInsertPerSec  := fmt.Sprint( float64(ix)/(1000/millisecs) )
+			lenS := len( strInsertPerSec )
+			if lenS > 5 { lenS = 5}			
+			strInsertPerSec2 := strInsertPerSec[0:lenS]
+			strSeconds2 = fmt.Sprint(strSeconds2,"")
+			//fmt.Print( strSeconds2, " - ", strInsertPerSec2, "; " )
+			if strInsertPerSec2 == "0" {
+				fmt.Print( "|" )							
+			} else {
+				fmt.Print( strInsertPerSec2, " " )			
+			}
 		}
 	}()
 	
@@ -524,66 +587,5 @@ func recoverTailableCursor() mongo.Cursor {
 
 		return c
 
-	
-}
-
-
-func writeLoadInfo() {
-	
-	
-		arrayLoad, ok := (<- chl)
-		if ok {
-			sum := int64(0)
-			for k,v := range arrayLoad {
-				sum += int64(v)
-				arrayLoadTotal[k] += int64(v)
-			}
-			if sum > 0 {
-				fmt.Printf("l%v ",sum)			
-			}
-			arrayLoadNew := make( []int64, insertThreads )
-			chl <- arrayLoadNew
-	
-		} else {
-			log.Fatal("error reading from chl 3")
-		}
-	
-	
-}
-
-
-func writeTailInfo(now time.Time, timeStart time.Time, millisecs float64){
-
-		cntTail,_ := (<- cht) 
-		cht <- 0
-		
-		//strSeconds := fmt.Sprint( now.Sub(timeStart).Seconds() )
-
-		tailTotal += cntTail
-
-		perSec := float64(cntTail) * millisecs / 1000
-		perSec  = math.Trunc( 10* perSec) / 10
-		
-		
-		if perSec < 1 {
-			fmt.Print( "|" )							
-		} else {
-			//fmt.Printf( " -%v %v- ",perSec,cntTail )			
-			fmt.Printf( "t%v ",perSec )			
-		}
-	
-	
-}
-
-func incTailCounter(){
-	
-		cntTail,ok := (<- cht)
-		if ok {
-			cntTail++
-			cht  <- cntTail
-			//print("cntTail:",cntTail)
-		} else {
-			print("cht is closed\n")
-		}						
 	
 }
