@@ -22,29 +22,44 @@ mkdir ~/mongo/data_rs1/node3
 echo
 echo running mongod processes...
 
-cd ~/mongo/program/bin; ./mongod --replSet rs1 --port=27001  --dbpath=/home/peter.buchmann/mongo/data_rs1/node1 --oplogSize 50 --smallfiles --logpath /home/peter.buchmann/mongo/data_rs1/node1/main.log --logappend --fork --rest
-cd ~/mongo/program/bin; ./mongod --replSet rs1 --port=27002  --dbpath=/home/peter.buchmann/mongo/data_rs1/node2 --oplogSize 50 --smallfiles --logpath /home/peter.buchmann/mongo/data_rs1/node2/main.log --logappend --fork --rest
-cd ~/mongo/program/bin; ./mongod --replSet rs1 --port=27003  --dbpath=/home/peter.buchmann/mongo/data_rs1/node3 --oplogSize 50 --smallfiles --logpath /home/peter.buchmann/mongo/data_rs1/node3/main.log --logappend --fork --rest
+small_files=" --smallfiles "
+small_files=""
+
+cd ~/mongo/program/bin; ./mongod --replSet rs1 --port=27001  --dbpath=/home/peter.buchmann/mongo/data_rs1/node1 --oplogSize 32000 $small_files  --logpath /home/peter.buchmann/mongo/data_rs1/node1/main.log --logappend --fork --rest --master
+cd ~/mongo/program/bin; ./mongod --replSet rs1 --port=27002  --dbpath=/home/peter.buchmann/mongo/data_rs1/node2 --oplogSize 32000 $small_files  --logpath /home/peter.buchmann/mongo/data_rs1/node2/main.log --logappend --fork --rest
+cd ~/mongo/program/bin; ./mongod --replSet rs1 --port=27003  --dbpath=/home/peter.buchmann/mongo/data_rs1/node3 --oplogSize 50    --smallfiles  --logpath /home/peter.buchmann/mongo/data_rs1/node3/main.log --logappend --fork --rest
 
 
 echo giving them time to start. note this might not be enough time!
 sleep 2
-ps -A | grep mongo
+ps -A | grep mongod
 
-echo
-echo
-echo "Now run:"
-echo "  ~/mongo/program/bin/mongo --shell --port 27003 start.js"
-echo
-echo conf = 
-echo {
-echo     _id : rs1,
-echo      members : [
-echo          {_id : 0, host : localhost:27001 },
-echo          //{_id : 1, host : localhost:27002 },
-echo          {_id : 2, host : localhost:27003 },
-echo      ]
-echo }
-echo
-echo # add an arbiter
-echo rs.addArb("localhost:27002")
+
+touch start.js
+echo ~/mongo/program/bin/mongo --shell --port 27001 start.js
+
+
+
+conf = 
+{
+    _id : "rs1",
+     members : [
+         {_id : 0, host : "localhost:27001" },
+         {_id : 1, host : "localhost:27002" }
+     ]
+}
+
+rs.initiate(conf)
+# add the last rs member as an arbiter
+rs.addArb("localhost:27003")
+
+rs.status()
+
+
+
+use local
+newsize = (1024/32) * 1024 * 1024 * 1024
+"size is " +Math.round(newsize/1000000/1000) + "GB"
+db.oplog.rs.drop()
+db.runCommand( { create : "oplog.rs", capped : true, size : newsize } )
+

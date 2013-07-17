@@ -14,10 +14,12 @@ import (
 var   countNoNextValue  int = 0
 const noNextValueMax    int = 2 
 
-const secondsDefer = 2					// upon cursor not found error - amount of sleep  - 
+const secondsDefer = 4							// upon cursor not found error - amount of sleep  - 
+const secondsDeferTailCursor = 1		// after sleep - set back additional x seconds
+const nofill = 0
 
 const insertThreads     = 8
-const insertsPerThread  = int64(2000)  // "cursor not found"
+const insertsPerThread  = int64(8000)  // "cursor not found"
 //const insertsPerThread  = int64(6000)  // "cursor not found"
 
 const outputLevel = 0
@@ -72,16 +74,17 @@ func main(){
 
 	startTimerLog()
 
-	oplog  := getOplogCollection(conn, "")
-	cursor := getTailableCursor(oplog)
 	colChangeLog, colCounterChangeLog := ensureChangeLogExists(conn)
 
-	go iterateTailCursor(cursor,colChangeLog, colCounterChangeLog)
 
 	for i:= 0; i< insertThreads; i++ {
 		batchStamp := int64(time.Now().Unix() )<<32  +  int64(i)*insertsPerThread
 		go fill( i, batchStamp)
 	}
+
+
+	go iterateTailCursor(colChangeLog, colCounterChangeLog)
+
 	
 	arrayLoad := make( []int64, insertThreads )
 	chl <- arrayLoad
@@ -108,10 +111,18 @@ func main(){
 	log.Print("==================================================")
 	log.Printf("Loaded-Tailed: %v - %v - %v percent",loadTotal,tailTotal,quote)
 
+	tsFinish := int32(time.Now().Unix())
+	log.Println("tsFinish: ",tsFinish )
+
+
 }
 
 
 func fill(idxThread int , batchStamp int64){
+	
+	if nofill > 0 {
+		return	
+	}
 
 	fctGetRecurseMsg := getRecurseMsg( fmt.Sprint("fill",idxThread," "))
 
@@ -152,11 +163,12 @@ func fill(idxThread int , batchStamp int64){
 	
 }
 
-func iterateTailCursor( c mongo.Cursor, oplogsubscription mongo.Collection , oplogSubscriptionCounter mongo.Collection ){
+func iterateTailCursor( oplogsubscription mongo.Collection , oplogSubscriptionCounter mongo.Collection ){
 
 
 	fctGetRecurseMsg := getRecurseMsg("recursion ")
-	//checkCursor(c)
+
+	c := recoverTailableCursor()
 	
 	for {
 		
@@ -165,6 +177,7 @@ func iterateTailCursor( c mongo.Cursor, oplogsubscription mongo.Collection , opl
 
 		if doBreak {
 
+			fmt.Println("going to sleep ",secondsDefer, " seconds")
 			time.Sleep( secondsDefer * time.Second )
 			
 			if countNoNextValue < noNextValueMax {
@@ -285,16 +298,15 @@ func checkCursor( c mongo.Cursor  ) ( bool,bool ){
 		}
 
 		if alive < 1  {
-			log.Println( fmt.Sprintf( "dead cursor id is %v - going to sleep\n", alive))
+			log.Println( fmt.Sprintf( "dead cursor id is %v", alive) )
 		}
 
-		log.Println( fmt.Sprintf( "await over - no next value no. %v of %v - going to sleep\n", countNoNextValue, noNextValueMax) )
+		log.Println( fmt.Sprintf( "await is over - no next value no. %v of %v", countNoNextValue, noNextValueMax) )
 
 		countNoNextValue++
 		if countNoNextValue > noNextValueMax {
 			return true, false
 		}
-
 
 	}
 
@@ -430,8 +442,8 @@ func getTailableCursor( oplog mongo.Collection ) mongo.Cursor  {
 	// instead, we start at some recent timestamp
 	// and demand natural sort (default anyway?)
 	// 	this can be time consuming
-	sixtySecondsEarlier := int32(time.Now().Unix()) - secondsDefer - (20*time.Millisecond)
-	//log.Println(sixtySecondsEarlier )
+	sixtySecondsEarlier := int32(time.Now().Unix()) - secondsDefer - secondsDeferTailCursor
+	log.Println("timestamp: ",sixtySecondsEarlier )
 	// make a mongo/bson timestamp from the unix timestamp
 	//		according to http://docs.mongodb.org/manual/core/document/
 	var sixtyInt64SecondsEarlier int64 = int64(sixtySecondsEarlier) << 32
@@ -439,9 +451,15 @@ func getTailableCursor( oplog mongo.Collection ) mongo.Cursor  {
 
 	sixtyMongoSecondsEarlier = mongo.Timestamp(5898932101230624778)		// example
 	sixtyMongoSecondsEarlier = mongo.Timestamp(sixtyInt64SecondsEarlier)
-	//log.Println(sixtyMongoSecondsEarlier)
 
 	cursor, err := oplog.Find( mongo.M{"ts": mongo.M{ "$gte":sixtyMongoSecondsEarlier}  }  ).Tailable(true).AwaitData(true).Sort( mongo.D{{"$natural", 1}} ).Cursor()
+
+
+	//fmt.Println(  " ts1 = Math.round( new Date().getTime()/1000) -300;" )
+	fmt.Println(  " ts2 = new Timestamp(",sixtySecondsEarlier,", 0);" )
+	fmt.Println(  "db.getSiblingDB('local').oplog.rs.find({'ts': { '$gte': ts2 }  }, {ts:1,op:1}  ).sort( {\"$natural\": 1} ) " )
+	 	  
+	// .addOption(DBQuery.Option.tailable).addOption(DBQuery.Option.awaitData)
 	if err != nil {
 		log.Println(   fmt.Sprint( "mongo oplog find error: ", err,"\n") )		
 		log.Fatal(err)
@@ -516,11 +534,9 @@ func startTimerLog(){
 func recoverTailableCursor() mongo.Cursor {
 	
 		//log.Println(   "Trying to recover: " )	
-		time.Sleep( 400 * time.Millisecond)
 		conn := getConn()
 		oplog  := getOplogCollection(conn, "")
 		//log.Println(   "Oplog retrieved " )	
-		
 		c := getTailableCursor(oplog)
 
 		return c
