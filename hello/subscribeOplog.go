@@ -19,7 +19,7 @@ const secondsDeferTailCursor = 1		// after sleep - set back additional x seconds
 const nofill = 0
 
 const insertThreads     = 8
-const insertsPerThread  = int64(8000)  // "cursor not found"
+const insertsPerThread  = int64(28000)  // "cursor not found"
 //const insertsPerThread  = int64(6000)  // "cursor not found"
 
 const outputLevel = 0
@@ -77,13 +77,19 @@ func main(){
 	colChangeLog, colCounterChangeLog := ensureChangeLogExists(conn)
 
 
+	go iterateTailCursor(colChangeLog, colCounterChangeLog)
+
+
+	time.Sleep( 200 * time.Millisecond )
+	
 	for i:= 0; i< insertThreads; i++ {
 		batchStamp := int64(time.Now().Unix() )<<32  +  int64(i)*insertsPerThread
-		go fill( i, batchStamp)
+		go loadInsert( i, batchStamp)
+		go loadRead(   i, batchStamp)
+		
 	}
 
 
-	go iterateTailCursor(colChangeLog, colCounterChangeLog)
 
 	
 	arrayLoad := make( []int64, insertThreads )
@@ -118,13 +124,22 @@ func main(){
 }
 
 
-func fill(idxThread int , batchStamp int64){
+func loadRead(idxThread int , batchStamp int64){
 	
 	if nofill > 0 {
 		return	
 	}
 
-	fctGetRecurseMsg := getRecurseMsg( fmt.Sprint("fill",idxThread," "))
+
+}
+
+func loadInsert(idxThread int , batchStamp int64){
+	
+	if nofill > 0 {
+		return	
+	}
+
+	fctGetRecurseMsg := getRecurseMsg( fmt.Sprint("loadInsert",idxThread," "))
 
 	conn := getConn()
 	defer conn.Close()
@@ -138,10 +153,10 @@ func fill(idxThread int , batchStamp int64){
 			 "lastSeen"   : int32(time.Now().Unix()) ,
 			 "categoryId" : 15 ,
 			 "title":       fmt.Sprint("title",i) ,
-			 "description": strings.Repeat( fmt.Sprint("description",i), 100),
+			 "description": strings.Repeat( fmt.Sprint("description",i), 35),
 		})
 		if err != nil {
-			log.Println(   fmt.Sprint( "mongo fill error: ", err,"\n") )		
+			log.Println(   fmt.Sprint( "mongo loadInsert error: ", err,"\n") )		
 			log.Fatal(err)
 		}
 		log.Print( fctGetRecurseMsg() )
@@ -159,7 +174,7 @@ func fill(idxThread int , batchStamp int64){
 		}
 		
 	}
-	fmt.Print(" -fill",idxThread," finished- ")
+	fmt.Print(" -loadInsert",idxThread," finished- ")
 	
 }
 
@@ -443,7 +458,7 @@ func getTailableCursor( oplog mongo.Collection ) mongo.Cursor  {
 	// and demand natural sort (default anyway?)
 	// 	this can be time consuming
 	sixtySecondsEarlier := int32(time.Now().Unix()) - secondsDefer - secondsDeferTailCursor
-	log.Println("timestamp: ",sixtySecondsEarlier )
+
 	// make a mongo/bson timestamp from the unix timestamp
 	//		according to http://docs.mongodb.org/manual/core/document/
 	var sixtyInt64SecondsEarlier int64 = int64(sixtySecondsEarlier) << 32
@@ -456,8 +471,11 @@ func getTailableCursor( oplog mongo.Collection ) mongo.Cursor  {
 
 
 	//fmt.Println(  " ts1 = Math.round( new Date().getTime()/1000) -300;" )
-	fmt.Println(  " ts2 = new Timestamp(",sixtySecondsEarlier,", 0);" )
+	fmt.Println(  "ts2 = new Timestamp(",sixtySecondsEarlier,", 0);" )
 	fmt.Println(  "db.getSiblingDB('local').oplog.rs.find({'ts': { '$gte': ts2 }  }, {ts:1,op:1}  ).sort( {\"$natural\": 1} ) " )
+
+	// db.getSiblingDB('offer-db').offers.test.find({},{description:0}).max({_id: ObjectId("51e800067e6abf81274b4e35") })
+
 	 	  
 	// .addOption(DBQuery.Option.tailable).addOption(DBQuery.Option.awaitData)
 	if err != nil {
