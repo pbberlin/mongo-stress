@@ -18,7 +18,6 @@ const deadPeriodsMax int = 310
 func main(){
 
 
-
 	const layout1 = "Jan 2, 2006 at 3:04pm (MST)"
 	const layout2 = "2006-01-02 15:04 05"
 
@@ -28,7 +27,6 @@ func main(){
 	fmt.Println( time.Unix(3600*24*740 +16,333).Format(layout2) )
 	fmt.Println( time.Now().Format(layout2) )
 
-	
 
 	// Connect to server.
 	    conn, err := mongo.Dial("localhost:27003")

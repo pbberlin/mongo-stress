@@ -1,3 +1,32 @@
+
+rm start.js
+touch start.js
+
+
+
+echo "conf = 
+{
+    _id : 'rs1',
+     members : [
+         {_id : 0, host : 'localhost:27001' },
+         {_id : 1, host : 'localhost:27002' }
+     ]
+}" >> start.js
+
+echo "rs.initiate(conf)"  >> start.js
+echo "// add the last rs member as an arbiter"  >> start.js
+echo "rs.addArb('localhost:27003')"  >> start.js
+echo "rs.status()" >> start.js
+
+
+# use local
+# newsize = (1024/32) * 1024 * 1024 * 1024
+# "size is " +Math.round(newsize/1000000/1000) + "GB"
+# db.oplog.rs.drop()
+# db.runCommand( { create : "oplog.rs", capped : true, size : newsize } )
+
+
+
 # make a test replica set
 
 # if you need to start over try:
@@ -35,31 +64,4 @@ sleep 2
 ps -A | grep mongod
 
 
-touch start.js
 echo ~/mongo/program/bin/mongo --shell --port 27001 start.js
-
-
-
-conf = 
-{
-    _id : "rs1",
-     members : [
-         {_id : 0, host : "localhost:27001" },
-         {_id : 1, host : "localhost:27002" }
-     ]
-}
-
-rs.initiate(conf)
-# add the last rs member as an arbiter
-rs.addArb("localhost:27003")
-
-rs.status()
-
-
-
-use local
-newsize = (1024/32) * 1024 * 1024 * 1024
-"size is " +Math.round(newsize/1000000/1000) + "GB"
-db.oplog.rs.drop()
-db.runCommand( { create : "oplog.rs", capped : true, size : newsize } )
-
