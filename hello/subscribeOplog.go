@@ -25,8 +25,8 @@ const secondsDefer = 4							// upon cursor not found error - amount of sleep  -
 const secondsDeferTailCursor = 1		// after sleep - set back additional x seconds
 const noInsert = 0
 
-const loadThreads     = 8
-const insertsPerThread  = int64(12000)  // if oplog is not big enough, causes "cursor not found"
+const LOAD_THREADS     = 8
+const insertsPerThread  = int64(2000)  // if oplog is not big enough, causes "cursor not found"
 
 
 const outputLevel = 0
@@ -41,10 +41,10 @@ var   mongoSecsEarlier mongo.Timestamp = mongo.Timestamp(5898548092499667758)	//
 const readBatchSize= 100
 
 var chl chan []int64 = make(chan []int64 ,1)			// channel load
-var arrayLoadTotal = make([]int64 ,loadThreads)
+var arrayLoadTotal = make([]int64 ,LOAD_THREADS)
 
 var chr chan []int64 = make(chan []int64 ,1)			// channel read
-var arrayReadTotal = make([]int64 ,loadThreads)
+var arrayReadTotal = make([]int64 ,LOAD_THREADS)
 
 var cht chan int64   = make(chan   int64 ,1)      // channel cursor tail
 var tailTotal = int64(0)
@@ -89,7 +89,7 @@ func main(){
 
 	startTimerLog()
 
-	colChangeLog, colCounterChangeLog := ensureChangeLogExists(conn)
+	colChangeLog, colCounterChangeLog := initChangeLog(conn)
 
 	go iterateTailCursor(colChangeLog, colCounterChangeLog)
 
@@ -98,7 +98,7 @@ func main(){
 	
 	loadRead :=  getFuncLoadRead()
 	
-	for i:= 0; i< loadThreads; i++ {
+	for i:= 0; i< LOAD_THREADS; i++ {
 		batchStamp := int64(time.Now().Unix() )<<32  +  int64(i)*insertsPerThread
 		go loadInsert( i, batchStamp)
 		go loadRead(   i, batchStamp)
@@ -107,10 +107,10 @@ func main(){
 
 
 	
-	arrayLoad := make( []int64, loadThreads )
+	arrayLoad := make( []int64, LOAD_THREADS )
 	chl <- arrayLoad
 
-	arrayRead := make( []int64, loadThreads )
+	arrayRead := make( []int64, LOAD_THREADS )
 	chr <- arrayRead
 
 	cht <- int64(0)
@@ -120,17 +120,20 @@ func main(){
 	log.Println("quit signal received: ", x)
 
 
+	tsFinish := time.Now().Unix()
+	elapsed  := (tsFinish-tsStart)
+	log.Println("tsFinish: ",tsFinish, " Dauer: " , elapsed )
+
+
 	loadTotal,readTotal :=  finalReport()
 
 	var percentage float64 = float64(tailTotal)/float64(loadTotal)
 	percentage = math.Trunc(percentage*1000)/10
 
 	log.Print("==================================================")
-	log.Printf("Read-Loaded-Tailed: %v - %v- %v - %v percent",readTotal,loadTotal,tailTotal,percentage)
+	log.Printf("Read-Loaded-Tailed: %v - %v- %v - %v percent", math.Trunc(float64(readTotal)/float64(elapsed)),loadTotal,tailTotal,percentage)
 
 
-	tsFinish := time.Now().Unix()
-	log.Println("tsFinish: ",tsFinish, " Dauer: " ,(tsStart - tsFinish)  )
 
 
 }
@@ -140,39 +143,55 @@ func getFuncLoadRead()  func(idxThread int,batchStamp int64) {
 	//newOid := mongo.NewObjectId()
 	//minOid := mongo.MinObjectIdForTime( tStart.Add(-200 * time.Millisecond))
 	minOid1999 := mongo.MinObjectIdForTime( time.Date(1999, time.November, 10, 15, 25, 0, 222, time.Local))
-	
-	//fmt.Println( newOid, minOid, minOid1999 )
-
-	//mgoCmd := "db.getSiblingDB(\"offer-db\").offers.test.find({},{description:0}).max({_id: ObjectId(\"51e800067e6abf81274b4e35\") })"
 	mgoCmd := fmt.Sprint( "db.getSiblingDB(\"offer-db\").offers.test.find({},{description:0}).min({_id: ObjectId(\"",minOid1999,"\") })" )
 	fmt.Println(mgoCmd)
+
+	mgoCmd  = fmt.Sprint( "db.getSiblingDB(\"offer-db\").offers.test.find({},{description:0}).sort({\"_id\":-1})" )
+	fmt.Println(mgoCmd)
+	
+
+	mgoCmd = fmt.Sprint( "db.getSiblingDB(\"offer-db\").oplog.subscription.find({},{im:0}).sort({\"_id\":-1})" )
+	fmt.Println(mgoCmd)
+
+	mgoCmd = fmt.Sprint( "db.getSiblingDB(\"offer-db\").oplog.subscription.counter.find({},{_id:0,changed3:0})" )
+	fmt.Println(mgoCmd)
+
+
+	mgoCmd = fmt.Sprint( "db.getSiblingDB(\"local\").oplog.rs.find({},{o:0}).sort({\"$natural\":-1})" )
+	fmt.Println(mgoCmd)
+
+
 
 
 	return func(idxThread int , batchStamp int64) {
 
 		//fmt.Println( "loadRead: ", idxThread , batchStamp  )	
+		fctGetRecurseMsg := getRecurseMsg( fmt.Sprint("loadRead",idxThread," "))
 
-		minOid := mongo.MinObjectIdForTime( time.Date(1999, time.November, 10, 15, 25, 0, 222, time.Local))
 
 		conn := getConn()
 		defer conn.Close()
-		dbChangeLog  := mongo.Database{conn, changelogDb, mongo.DefaultLastErrorCmd}	// get a database object
-		colOffers := dbChangeLog.C(offers)  
+		colOffers := getCollection(conn,changelogDb,offers)
 
-		fctGetRecurseMsg := getRecurseMsg( fmt.Sprint("loadRead",idxThread," "))
+		getPartitionStart := getFuncPartitionStart()
+		
+		minOid,initMinOid:= getPartitionStart(idxThread )
+		loopMinOid := initMinOid
 
 		i := int64(0)
-
 		for  {
 
 			i++
-			if i > 3314000 {
+			if i > (10 * 1000 * 1000) {
+				log.Println("more than 10.000 iterations. Break.")		
 				break	
 			}
+			log.Print( fctGetRecurseMsg() )
+			incReadCounter(i,idxThread)
 
 
 			var m mongo.M
-		  err := colOffers.Find(mongo.M{"_id": mongo.M{"$gte": minOid,},}).Fields(mongo.M{"description": 1}).Skip(readBatchSize).Limit(1).One(&m)
+		  err := colOffers.Find(mongo.M{"_id": mongo.M{"$gte": loopMinOid,},}).Fields(mongo.M{"description": 0}).Skip(readBatchSize).Limit(1).One(&m)
 			if err != nil  && err != mongo.Done {
 				log.Println(   fmt.Sprint( "mongo loadRead error: ", err,"\n") )		
 				log.Fatal(err)
@@ -180,29 +199,22 @@ func getFuncLoadRead()  func(idxThread int,batchStamp int64) {
 
 			tmpMinOid, ok := m["_id"].(mongo.ObjectId)
 			if ! ok {
-				fmt.Print(" -read cursor exhausted 1? - err: ", err)
-				break
-				//log.Fatal(err)				
-			}
-			if minOid == tmpMinOid {
-				fmt.Print(" -read cursor exhausted 2- ")
-				break
-			}
-			//fmt.Println(idxThread, " new oid" , minOid, tmpMinOid )
-			minOid = tmpMinOid
-
-			log.Print( fctGetRecurseMsg() )
-			
-			const chunkSize = 100
-			if (i+1) % chunkSize == 0 {
-				arrayRead, ok := (<- chr)
-				if ok {
-					arrayRead[idxThread] += chunkSize
-					chr <- arrayRead
+				if err.Error() == "mongo: cursor has no more results" {
+					fmt.Print("restart1_",idxThread)
+					loopMinOid = minOid
+					continue
 				} else {
-					log.Fatal("error reading from chr 2")
+					log.Fatal("end of read seq. err: ", err)
 				}
+			} else if loopMinOid == tmpMinOid {
+				fmt.Print("restart2 ")
+				loopMinOid = minOid
+				continue
+			} else {
+				//fmt.Println(idxThread, " new oid" , loopMinOid, tmpMinOid )
+				loopMinOid = tmpMinOid
 			}
+
 			
 		}
 		fmt.Print(" -loadRead",idxThread,"_finished- ")
@@ -224,8 +236,7 @@ func loadInsert(idxThread int , batchStamp int64){
 
 	conn := getConn()
 	defer conn.Close()
-	dbChangeLog  := mongo.Database{conn, changelogDb, mongo.DefaultLastErrorCmd}	// get a database object
-	colOffers := dbChangeLog.C(offers)  
+	colOffers := getCollection( conn, changelogDb, offers  )
 	
 	for i:=batchStamp ; i < batchStamp+insertsPerThread; i++ {
 		
@@ -306,8 +317,10 @@ func iterateTailCursor( oplogsubscription mongo.Collection , oplogSubscriptionCo
 
 			if   ! strings.HasPrefix( ns ,changelogPath)  {
 
-
-				mongoSecsEarlier = m["ts"].(mongo.Timestamp)
+				mongoSecsEarlier,ok = m["ts"].(mongo.Timestamp)
+				if ! ok {
+					log.Fatal("m[ts] not a valid timestamp")	
+				}
 				var oid mongo.ObjectId = mongo.ObjectId("51dc1b9d419c")  // 12 chars
 
 				//str, ok := data.(string) - http://stackoverflow.com/questions/14289256/cannot-convert-data-type-interface-to-type-string-need-type-assertion
@@ -343,7 +356,8 @@ func iterateTailCursor( oplogsubscription mongo.Collection , oplogSubscriptionCo
 
 
 				incTailCounter()
-				errCounter := oplogSubscriptionCounter.Update( mongo.M{"counter": mongo.M{"$exists": true}, } , mongo.M{"$inc"   : mongo.M{"counter": 1} } ,)
+				//errCounter := oplogSubscriptionCounter.Update( mongo.M{"counter": mongo.M{"$exists": true}, } , mongo.M{"$inc"   : mongo.M{"counter": 1}, "$set" : mongo.M{"changed3":2} },)
+				  errCounter := oplogSubscriptionCounter.Update( mongo.M{"counter": mongo.M{"$exists": true}, } , mongo.M{"$inc"   : mongo.M{"counter": 1} },)
 				if errCounter != nil {
 					log.Fatal("lf12 ",errCounter)
 				}
@@ -502,19 +516,6 @@ func clearAll(conn mongo.Conn) {
 
 
 
-func getOplogCollection(conn mongo.Conn, colName string) mongo.Collection {
-	
-	if colName == "" {
-		colName = 	"oplog.rs"
-	}
-	
-	log.Print(  fmt.Sprint("\n\n==(re-)connect_to_",colName,"== ... ") )
-	dbOplog  := mongo.Database{conn, "local", mongo.DefaultLastErrorCmd}	// get a database object
-	oplog    := dbOplog.C( colName )  // get collection
-	
-	return oplog
-
-}
 
 
 func getTailableCursor( oplog mongo.Collection ) mongo.Cursor  {
@@ -542,8 +543,6 @@ func getTailableCursor( oplog mongo.Collection ) mongo.Cursor  {
 	// make a mongo/bson timestamp from the unix timestamp
 	//		according to http://docs.mongodb.org/manual/core/document/
 	var pow32 int64 = someSecsEarlier << 32
-
-	mongoSecsEarlier = mongo.Timestamp(5898932101230624778)		// example
 	mongoSecsEarlier = mongo.Timestamp(pow32)
 
 	cursor, err := oplog.Find( mongo.M{"ts": mongo.M{ "$gte":mongoSecsEarlier}  }  ).Tailable(true).AwaitData(true).Sort( mongo.D{{"$natural", 1}} ).Cursor()
@@ -568,15 +567,17 @@ func getTailableCursor( oplog mongo.Collection ) mongo.Cursor  {
 
 
 
-func ensureChangeLogExists(conn mongo.Conn) (mongo.Collection, mongo.Collection){
+func initChangeLog(conn mongo.Conn) (mongo.Collection, mongo.Collection){
 	
 	// create a capped collection if it is empty
-	dbChangeLog  := mongo.Database{conn, changelogDb, mongo.DefaultLastErrorCmd}	// get a database object
-	colChangeLog := dbChangeLog.C(changelogCol)  
+	colChangeLog := getCollection( conn, changelogDb, changelogCol  )
+	colChangelogCounter := getCollection( conn, changelogDb, counterChangeLogCol)
+
 	n, _ := colChangeLog.Find(nil).Count()
 	if n>0   {
 		log.Println("capped oplog ",changelogPath,"already exists. Entries: ", n)
 	} else {
+		dbChangeLog  := mongo.Database{conn, changelogDb, mongo.DefaultLastErrorCmd}	// get a database object
 		errCreate := dbChangeLog.Run(
 			mongo.D{
 				{"create", fmt.Sprint( changelogCol ) },
@@ -591,7 +592,6 @@ func ensureChangeLogExists(conn mongo.Conn) (mongo.Collection, mongo.Collection)
 			log.Println("capped oplog ",changelogPath,"created")
 		}
 	}
-	colChangelogCounter := dbChangeLog.C(counterChangeLogCol)  
 	errCounter := colChangelogCounter.Upsert( mongo.M{"counter": mongo.M{"$exists": true}, } , mongo.M{"counter": 1}  ,)
 	if errCounter != nil {
 		log.Fatal("lf11 ",errCounter)
@@ -613,12 +613,53 @@ func startTimerLog(){
 	log.Print( timeStart.Format( layout3 ) )
 	ctick := time.Tick(intervalTimer * time.Millisecond)
 
+	i := int64(0)
+
+
 
 	go func() { 
 		for now := range ctick {
 
+			if i % 40 == 0 {
+				fmt.Printf("\n")				
+				fmt.Printf("\n%10s%10s%10s%10s","seqread","insert","tail","lag")
+				fmt.Printf("\n================================================")
+			}
+
+			fmt.Print("\n")
 			writeLoadReadInfo()
 			writeTailInfo(now,timeStart, float64(intervalTimer))
+			
+			if i % 5 == 0 {
+				// db.getSiblingDB("local").oplog.rs.find({},{o:0}).sort({"$natural":-1})			
+				var m3 mongo.M
+				var err error
+
+				conn := getConn()
+				defer conn.Close()
+				oplog := getOplogCollection( conn, "", true)				
+
+				err = oplog.Find( mongo.M{} ).Sort( mongo.D{{"$natural", -1}} ).One(&m3)
+				if err != nil  && err != mongo.Done {
+					log.Fatal("query last oplog entry error:",err)
+				}
+
+				newestOplog,ok := m3["ts"].(mongo.Timestamp)
+				if ! ok {
+					fmt.Println("oplog did not contain a newest entry")				
+				}
+				secsNewestOplog := int64(newestOplog)
+				secsNewestOplog  = secsNewestOplog >> 32
+				
+				lastTailedOplog := int64(mongoSecsEarlier) >> 32
+				fmt.Printf("%10v",secsNewestOplog - lastTailedOplog )			
+
+			} else {
+				fmt.Printf("%10s","-")			
+			}
+			
+			
+			i++
 
 		}
 	}()
@@ -629,9 +670,10 @@ func startTimerLog(){
 
 func recoverTailableCursor() mongo.Cursor {
 	
+	
 		//log.Println(   "Trying to recover: " )	
 		conn := getConn()
-		oplog  := getOplogCollection(conn, "")
+		oplog  := getOplogCollection(conn, "", false)
 		//log.Println(   "Oplog retrieved " )	
 		c := getTailableCursor(oplog)
 
@@ -643,24 +685,6 @@ func recoverTailableCursor() mongo.Cursor {
 
 func writeLoadReadInfo() {
 	
-	
-		arrayLoad, ok := (<- chl)
-		if ok {
-			sum := int64(0)
-			for k,v := range arrayLoad {
-				sum += int64(v)
-				arrayLoadTotal[k] += int64(v)
-			}
-			if sum > 0 {
-				fmt.Printf("l%v ",sum)			
-			}
-			arrayLoadNew := make( []int64, loadThreads )
-			chl <- arrayLoadNew
-	
-		} else {
-			log.Fatal("error reading from chl 3")
-		}
-	
 
 
 		arrayRead, ok := (<- chr)
@@ -671,16 +695,40 @@ func writeLoadReadInfo() {
 				arrayReadTotal[k] += int64(v)
 			}
 			sum *= readBatchSize
+			/*
 			if sum > 0 {
 				fmt.Printf("r%v ",sum)			
 			}
-			arrayReadNew := make( []int64, loadThreads )
+			*/		
+			fmt.Printf("%10v",sum)			
+			arrayReadNew := make( []int64, LOAD_THREADS )
 			chr <- arrayReadNew
 	
 		} else {
 			log.Fatal("error reading from chr 3")
 		}
 
+
+
+		arrayLoad, ok := (<- chl)
+		if ok {
+			sum := int64(0)
+			for k,v := range arrayLoad {
+				sum += int64(v)
+				arrayLoadTotal[k] += int64(v)
+			}
+			/*
+			if sum > 0 {
+				fmt.Printf("l%v ",sum)			
+			}
+			*/
+			fmt.Printf("%10v",sum)			
+			arrayLoadNew := make( []int64, LOAD_THREADS )
+			chl <- arrayLoadNew
+	
+		} else {
+			log.Fatal("error reading from chl 3")
+		}
 
 	
 }
@@ -698,13 +746,15 @@ func writeTailInfo(now time.Time, timeStart time.Time, intervalTimer float64){
 		perSec := float64(cntTail) * intervalTimer / 1000
 		perSec  = math.Trunc( 10* perSec) / 10
 		
-		
+		/*
 		if perSec < 1 {
 			fmt.Print( "|" )							
 		} else {
 			//fmt.Printf( " -%v %v- ",perSec,cntTail )			
 			fmt.Printf( "t%v ",perSec )			
 		}
+		*/
+		fmt.Printf( "%10v",perSec )			
 	
 	
 }
@@ -719,6 +769,23 @@ func incTailCounter(){
 		} else {
 			print("cht is closed\n")
 		}						
+	
+}
+
+
+
+func incReadCounter(i int64, idxThread int){
+
+		const chunkSize = 100
+		if (i+1) % chunkSize == 0 {
+			arrayRead, ok := (<- chr)
+			if ok {
+				arrayRead[idxThread] += chunkSize
+				chr <- arrayRead
+			} else {
+				log.Fatal("error reading from chr 2")
+			}
+		}
 	
 }
 
@@ -756,4 +823,103 @@ func finalReport() (x int64, y int64){
 	return loadTotal, readTotal 
 	 
 	
+}
+
+
+func getCollection(conn mongo.Conn, nameDb string, nameCol string  )(col mongo.Collection){
+	
+		tmpDb  := mongo.Database{conn, nameDb, mongo.DefaultLastErrorCmd}	// get a database object
+		col    = tmpDb.C(nameCol)  
+		return
+	
+}
+
+func getOplogCollection(conn mongo.Conn, colName string, silent bool) mongo.Collection {
+	
+	if colName == "" {
+		colName = 	"oplog.rs"
+	}
+	
+	if silent {
+	} else {
+		log.Print(  fmt.Sprint("\n\n==(re-)connect_to_",colName,"== ... ") )
+	}
+	dbOplog  := mongo.Database{conn, "local", mongo.DefaultLastErrorCmd}	// get a database object
+	oplog    := dbOplog.C( colName )  // get collection
+	
+	return oplog
+
+}
+
+/*
+	partitioning data, so that reads can start at different partitions
+
+*/
+func getFuncPartitionStart() func(threadIdx int) (x,y mongo.ObjectId){
+
+		conn := getConn()
+		defer conn.Close()
+		colOffers := getCollection(conn,changelogDb,offers)
+		
+		
+
+		// because auto-oids of mongo contain a timestamp, we are lucky 
+		// to postulate the minimum and maximum possible oids
+		minOidPostulated := mongo.MinObjectIdForTime( time.Date(1999, time.November,  1, 02, 01, 0, 222, time.Local))
+		maxOidPostulated := mongo.MinObjectIdForTime( time.Date(2030, time.December, 31, 23, 59, 0, 222, time.Local))
+		if minOidPostulated > maxOidPostulated {
+			log.Fatal( "minOidPostulated must be smaller than maxOidPostulated", minOidPostulated , maxOidPostulated )
+		}
+
+		// with their help, we query the -real- minOid and maxOid of the current data set
+		var m1,m2 mongo.M
+		var err error
+	  err = colOffers.Find(mongo.M{"_id": mongo.M{"$gte": minOidPostulated,},}).Fields(mongo.M{"_id": 1}).
+	  	Skip(0).Sort( mongo.M{"_id":  1,}, ).Limit(1).One(&m1)
+		if err != nil  && err != mongo.Done {
+			log.Fatal("query min error:",err)
+		}
+
+	  err = colOffers.Find(mongo.M{"_id": mongo.M{"$lte": maxOidPostulated,},}).Fields(mongo.M{"_id": 1}).
+	  	Skip(0).Sort( mongo.M{"_id": -1,}, ).Limit(1).One(&m2)
+		if err != nil  && err != mongo.Done {
+			log.Fatal("query max error:",err)
+		}
+	
+		oidMin,ok := m1["_id"].(mongo.ObjectId)
+		if ! ok {
+			log.Fatal("min did not contain an OID")				
+		}
+		oidMax,ok := m2["_id"].(mongo.ObjectId)
+		if ! ok {
+			log.Fatal("max did not contain an OID")				
+		}
+
+		/* Now we could either partition by record -count-
+				which brings different -seek- times 
+				to find the 1 ...10 millonth record
+				
+			Or we could stupidly partition by seconds passed
+			assuming evenly distributed insertion times
+			which is imperfect but good enough,
+			as we loop-wrap anyway
+		*/
+
+		ctMin, ctMax := oidMin.CreationTime(), oidMax.CreationTime()
+		diffTime := ctMax.Sub(ctMin)
+
+
+		return func(threadIdx int)(minOid,minOidThreadPartition mongo.ObjectId) {
+
+			partitionTimeDiff := time.Duration(threadIdx)*diffTime / time.Duration(LOAD_THREADS)
+			//fmt.Println("diff",diffTime, partitionTimeDiff)				
+			timeMinThread := ctMin.Add( partitionTimeDiff )
+			minOidThread  := mongo.MinObjectIdForTime( timeMinThread )
+
+			//const layout2 = "01-02 15:04 05"
+			//fmt.Printf("threadIndex: %v, oid-min %v threadStart %v oid-max %v \n",threadIdx,oidMin.CreationTime().Format(layout2),minOidThread.CreationTime().Format(layout2),oidMax.CreationTime().Format(layout2) )
+			return oidMin,minOidThread
+
+		}
+
 }

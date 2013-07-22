@@ -1,22 +1,24 @@
+#!/bin/bash
 
 rm start.js
 touch start.js
 
 
-
-echo "conf = 
+echo "function init(){
+conf = 
 {
     _id : 'rs1',
      members : [
          {_id : 0, host : 'localhost:27001' },
          {_id : 1, host : 'localhost:27002' }
      ]
-}" >> start.js
+} ;
 
-echo "rs.initiate(conf)"  >> start.js
-echo "// add the last rs member as an arbiter"  >> start.js
-echo "rs.addArb('localhost:27003')"  >> start.js
-echo "rs.status()" >> start.js
+rs.initiate(conf) ;
+// add the last rs member as an arbiter
+rs.addArb('localhost:27003') ;
+rs.status() ;
+}" >> start.js
 
 
 # use local
