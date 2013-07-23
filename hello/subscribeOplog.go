@@ -2,10 +2,15 @@ package main
 
 
 /*
-	Mongo Load Tester
-	Mongo Tailable Cursor Tester
+This is a go implementation of a tailable cursor against the oplog
+as describe at the bottom of this document: 
+	http://docs.mongodb.org/manual/tutorial/create-tailable-cursor/
+
+It is also a Mongo Load Tester
 	
-	Testet Inserts, Reads, 
+It Tests Inserts, Reads, 
+
+
 */
 
 import (
@@ -16,6 +21,8 @@ import (
 	"strings"
 	"fmt"
 //	_ "os"
+  "net/http"
+	"sync/atomic"  
 )
 
 var   countNoNextValue  int = 0
@@ -55,87 +62,13 @@ var	tsStart int64      = time.Now().Unix()
 var	tStart  time.Time  = time.Now()
 
 
-
-/*
-this is a go implementation of a tailable cursor against the oplog
-as describe at the bottom of this document: 
-	http://docs.mongodb.org/manual/tutorial/create-tailable-cursor/
-*/
-func getConn() mongo.Conn {
-
-	conn, err := mongo.Dial("localhost:27001")
-	if err != nil {
-		log.Println("getConn failed")
-		log.Fatal(err)
-	}
-	return conn
-
-}
+var timeXSaveOp   int64 = time.Now().Unix()
+var lastSaveOperation   int64 = time.Now().Unix()
 
 
 func main(){
-
-	conn := getConn()
-	defer conn.Close()
-
-	// Wrap connection with logger so that we can view the traffic to and from the server.
-	// conn = mongo.NewLoggingConn(conn, log.New(os.Stdout, "", 0), "")
-
-	// Clear the log prefix for more readable output.
-	log.SetFlags(0)
-
-	//clearAll(conn)
-
-
-	startTimerLog()
-
-	colChangeLog, colCounterChangeLog := initChangeLog(conn)
-
-	go iterateTailCursor(colChangeLog, colCounterChangeLog)
-
-
-	time.Sleep( 200 * time.Millisecond )
-	
-	loadRead :=  getFuncLoadRead()
-	
-	for i:= 0; i< LOAD_THREADS; i++ {
-		batchStamp := int64(time.Now().Unix() )<<32  +  int64(i)*insertsPerThread
-		go loadInsert( i, batchStamp)
-		go loadRead(   i, batchStamp)
-		
-	}
-
-
-	
-	arrayLoad := make( []int64, LOAD_THREADS )
-	chl <- arrayLoad
-
-	arrayRead := make( []int64, LOAD_THREADS )
-	chr <- arrayRead
-
-	cht <- int64(0)
-	
-	
-	x := <- cq
-	log.Println("quit signal received: ", x)
-
-
-	tsFinish := time.Now().Unix()
-	elapsed  := (tsFinish-tsStart)
-	log.Println("tsFinish: ",tsFinish, " Dauer: " , elapsed )
-
-
-	loadTotal,readTotal :=  finalReport()
-
-	var percentage float64 = float64(tailTotal)/float64(loadTotal)
-	percentage = math.Trunc(percentage*1000)/10
-
-	log.Print("==================================================")
-	log.Printf("Read-Loaded-Tailed: %v - %v- %v - %v percent", math.Trunc(float64(readTotal)/float64(elapsed)),loadTotal,tailTotal,percentage)
-
-
-
-
+	http.HandleFunc("/", handler)
+	http.ListenAndServe(":8080", nil)
 }
 
 func getFuncLoadRead()  func(idxThread int,batchStamp int64) {
@@ -200,14 +133,14 @@ func getFuncLoadRead()  func(idxThread int,batchStamp int64) {
 			tmpMinOid, ok := m["_id"].(mongo.ObjectId)
 			if ! ok {
 				if err.Error() == "mongo: cursor has no more results" {
-					fmt.Print("restart1_",idxThread)
+					fmt.Print(" rstrt",idxThread)
 					loopMinOid = minOid
 					continue
 				} else {
 					log.Fatal("end of read seq. err: ", err)
 				}
 			} else if loopMinOid == tmpMinOid {
-				fmt.Print("restart2 ")
+					fmt.Print(" rstrtTWO",idxThread)
 				loopMinOid = minOid
 				continue
 			} else {
@@ -253,16 +186,8 @@ func loadInsert(idxThread int , batchStamp int64){
 		}
 		log.Print( fctGetRecurseMsg() )
 
-		const chunkSize = 100
-		if (i+1) % chunkSize == 0 {
-			arrayLoad, ok := (<- chl)
-			if ok {
-				arrayLoad[idxThread] += chunkSize
-				chl <- arrayLoad
-			} else {
-				log.Fatal("error reading from chl 2")
-			}
-		}
+		incLoadCounter(i,idxThread)
+		_ =  updLoadTime( time.Now().Unix() ,0)	
 		
 	}
 	fmt.Print(" -loadInsert",idxThread,"_finished- ")
@@ -317,10 +242,16 @@ func iterateTailCursor( oplogsubscription mongo.Collection , oplogSubscriptionCo
 
 			if   ! strings.HasPrefix( ns ,changelogPath)  {
 
+				var ok bool = true	
 				mongoSecsEarlier,ok = m["ts"].(mongo.Timestamp)
 				if ! ok {
 					log.Fatal("m[ts] not a valid timestamp")	
 				}
+				timeOfSaveOperation := int64(mongoSecsEarlier) >> 32
+				//_ =  updLoadTime( 0, time.Now().Unix() )	
+				_ =  updLoadTime( 0, timeOfSaveOperation )	
+				
+				
 				var oid mongo.ObjectId = mongo.ObjectId("51dc1b9d419c")  // 12 chars
 
 				//str, ok := data.(string) - http://stackoverflow.com/questions/14289256/cannot-convert-data-type-interface-to-type-string-need-type-assertion
@@ -356,6 +287,7 @@ func iterateTailCursor( oplogsubscription mongo.Collection , oplogSubscriptionCo
 
 
 				incTailCounter()
+				
 				//errCounter := oplogSubscriptionCounter.Update( mongo.M{"counter": mongo.M{"$exists": true}, } , mongo.M{"$inc"   : mongo.M{"counter": 1}, "$set" : mongo.M{"changed3":2} },)
 				  errCounter := oplogSubscriptionCounter.Update( mongo.M{"counter": mongo.M{"$exists": true}, } , mongo.M{"$inc"   : mongo.M{"counter": 1} },)
 				if errCounter != nil {
@@ -622,7 +554,7 @@ func startTimerLog(){
 
 			if i % 40 == 0 {
 				fmt.Printf("\n")				
-				fmt.Printf("\n%10s%10s%10s%10s","seqread","insert","tail","lag")
+				fmt.Printf("\n%10s%10s%10s%10s","seq_rd","insert","tail","lag")
 				fmt.Printf("\n================================================")
 			}
 
@@ -632,6 +564,8 @@ func startTimerLog(){
 			
 			if i % 5 == 0 {
 				// db.getSiblingDB("local").oplog.rs.find({},{o:0}).sort({"$natural":-1})			
+
+/*
 				var m3 mongo.M
 				var err error
 
@@ -648,11 +582,18 @@ func startTimerLog(){
 				if ! ok {
 					fmt.Println("oplog did not contain a newest entry")				
 				}
+				
 				secsNewestOplog := int64(newestOplog)
 				secsNewestOplog  = secsNewestOplog >> 32
 				
 				lastTailedOplog := int64(mongoSecsEarlier) >> 32
 				fmt.Printf("%10v",secsNewestOplog - lastTailedOplog )			
+
+*/
+				lag :=  updLoadTime( 0 ,0 )	
+				fmt.Printf("%10v",lag)		
+				
+
 
 			} else {
 				fmt.Printf("%10s","-")			
@@ -681,6 +622,7 @@ func recoverTailableCursor() mongo.Cursor {
 
 	
 }
+
 
 
 func writeLoadReadInfo() {
@@ -759,6 +701,9 @@ func writeTailInfo(now time.Time, timeStart time.Time, intervalTimer float64){
 	
 }
 
+
+
+
 func incTailCounter(){
 	
 		cntTail,ok := (<- cht)
@@ -788,6 +733,45 @@ func incReadCounter(i int64, idxThread int){
 		}
 	
 }
+
+func incLoadCounter(i int64, idxThread int){
+	
+		const chunkSize = 100
+		if (i+1) % chunkSize == 0 {
+			arrayLoad, ok := (<- chl)
+			if ok {
+				arrayLoad[idxThread] += chunkSize
+				chl <- arrayLoad
+			} else {
+				log.Fatal("error reading from chl 2")
+			}
+		}
+	
+}
+
+
+
+func updLoadTime(newSaveTime int64,  timeSaveOp int64)  int64{
+
+	if(newSaveTime > 1){
+	  atomic.StoreInt64( &lastSaveOperation, newSaveTime, )
+	  //fmt.Print(" save:" , atomic.LoadInt64(&lastSaveOperation) )
+	}
+
+	if(timeSaveOp > 1){
+	  atomic.StoreInt64( &timeXSaveOp, timeSaveOp, )
+	  //fmt.Print(" tail:" , atomic.LoadInt64(&timeXSaveOp) )
+	}
+
+
+  timeSaveOp =  atomic.LoadInt64(&lastSaveOperation)
+  //lastTail :=  atomic.LoadInt64(&timeXSaveOp)
+
+	
+	return ( time.Now().Unix() - timeSaveOp)
+	
+}
+
 
 
 func finalReport() (x int64, y int64){
@@ -823,6 +807,18 @@ func finalReport() (x int64, y int64){
 	return loadTotal, readTotal 
 	 
 	
+}
+
+
+func getConn() mongo.Conn {
+
+	conn, err := mongo.Dial("localhost:27001")
+	if err != nil {
+		log.Println("getConn failed")
+		log.Fatal(err)
+	}
+	return conn
+
 }
 
 
@@ -888,7 +884,10 @@ func getFuncPartitionStart() func(threadIdx int) (x,y mongo.ObjectId){
 	
 		oidMin,ok := m1["_id"].(mongo.ObjectId)
 		if ! ok {
-			log.Fatal("min did not contain an OID")				
+			
+			log.Print("min did not contain an OID - using a default ")				
+			oidMin = mongo.MinObjectIdForTime( time.Date(1999, time.November,  1, 02, 01, 0, 222, time.Local))
+			
 		}
 		oidMax,ok := m2["_id"].(mongo.ObjectId)
 		if ! ok {
@@ -923,3 +922,90 @@ func getFuncPartitionStart() func(threadIdx int) (x,y mongo.ObjectId){
 		}
 
 }
+
+
+func handler(w http.ResponseWriter, r *http.Request) {
+	
+  //fmt.Fprintf(w, "Hi there, I love %s!", r.URL.Path[1:])
+  
+  path1 := r.URL.Path[1:]
+  if ! strings.HasPrefix( path1, "start" ){
+  	fmt.Fprintf(w, "==================================================\n")
+  	fmt.Fprintf(w, "use /start to begin \n")
+  	return
+  }
+  
+  fmt.Fprintf(w, "starting ...\n")
+  fmt.Fprintf(w, strings.Repeat("     ",9000))
+  fmt.Fprintf(w, "\n")
+
+
+
+
+	conn := getConn()
+	defer conn.Close()
+
+	// Wrap connection with logger so that we can view the traffic to and from the server.
+	// conn = mongo.NewLoggingConn(conn, log.New(os.Stdout, "", 0), "")
+
+	// Clear the log prefix for more readable output.
+	log.SetFlags(0)
+
+	//clearAll(conn)
+
+
+	startTimerLog()
+
+	colChangeLog, colCounterChangeLog := initChangeLog(conn)
+
+	go iterateTailCursor(colChangeLog, colCounterChangeLog)
+
+
+	time.Sleep( 200 * time.Millisecond )
+	
+	//loadRead :=  getFuncLoadRead()
+	
+	for i:= 0; i< LOAD_THREADS; i++ {
+		batchStamp := int64(time.Now().Unix() )<<32  +  int64(i)*insertsPerThread
+		go loadInsert( i, batchStamp)
+		//go loadRead(   i, batchStamp)
+		
+	}
+
+
+	
+	arrayLoad := make( []int64, LOAD_THREADS )
+	chl <- arrayLoad
+
+	arrayRead := make( []int64, LOAD_THREADS )
+	chr <- arrayRead
+
+	cht <- int64(0)
+	
+	
+	x := <- cq
+	log.Println("quit signal received: ", x)
+
+
+	tsFinish := time.Now().Unix()
+	elapsed  := (tsFinish-tsStart)
+	log.Println("tsFinish: ",tsFinish, " Dauer: " , elapsed )
+
+
+	loadTotal,readTotal :=  finalReport()
+
+	var percentage float64 = float64(tailTotal)/float64(loadTotal)
+	percentage = math.Trunc(percentage*1000)/10
+	
+	readPerSec :=  int64(   math.Trunc(float64(readTotal)/float64(elapsed))   )
+
+	log.Print(     "==================================================")
+	log.Printf(    "ReadTotal-Read-Loaded-Tailed: %12v - %8v - %v- %v - %v%%", readTotal,readPerSec,loadTotal,tailTotal,percentage)
+
+	fmt.Fprintf(w, "==================================================\n")
+	fmt.Fprintf(w, "ReadTotal-Read-Loaded-Tailed: %12v - %8v - %v- %v - %v%%", readTotal,readPerSec,loadTotal,tailTotal,percentage)
+
+
+
+}
+
