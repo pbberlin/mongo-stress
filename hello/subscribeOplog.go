@@ -20,9 +20,12 @@ import (
 	"math"
 	"strings"
 	"fmt"
-//	_ "os"
+	"os/exec"
   "net/http"
 	"sync/atomic"  
+	"bytes" 
+	"strconv" 
+	"errors"
 )
 
 var   countNoNextValue  int = 0
@@ -31,9 +34,12 @@ const noNextValueMax    int = 2
 const secondsDefer = 4							// upon cursor not found error - amount of sleep  - 
 const secondsDeferTailCursor = 1		// after sleep - set back additional x seconds
 const noInsert = 0
+const noRead   = 0
 
 const LOAD_THREADS     = 8
-const insertsPerThread  = int64(2000)  // if oplog is not big enough, causes "cursor not found"
+const READ_THREADS     = 2
+
+const insertsPerThread  = int64(4000)  // if oplog is not big enough, causes "cursor not found"
 
 
 const outputLevel = 0
@@ -51,7 +57,7 @@ var chl chan []int64 = make(chan []int64 ,1)			// channel load
 var arrayLoadTotal = make([]int64 ,LOAD_THREADS)
 
 var chr chan []int64 = make(chan []int64 ,1)			// channel read
-var arrayReadTotal = make([]int64 ,LOAD_THREADS)
+var arrayReadTotal = make([]int64 ,READ_THREADS)
 
 var cht chan int64   = make(chan   int64 ,1)      // channel cursor tail
 var tailTotal = int64(0)
@@ -62,16 +68,31 @@ var	tsStart int64      = time.Now().Unix()
 var	tStart  time.Time  = time.Now()
 
 
-var timeXSaveOp   int64 = time.Now().Unix()
-var lastSaveOperation   int64 = time.Now().Unix()
+var timeLastOplogOperation   int64 = time.Now().Unix()
+var timeLastSaveOperation   int64 = time.Now().Unix()
+const lagSize = 4
+var lv []int64 = make( []int64, lagSize )
 
+var freeMem int64 = 0
 
 func main(){
+	
+
+	freeMemTmp, err := OsFreeMemMB()
+	if err == nil {
+		freeMem = freeMemTmp
+		fmt.Println( "Hardware Memory is ", freeMem, " MB" )	
+	} else {
+		log.Fatal(err)
+	}
+	
 	http.HandleFunc("/", handler)
 	http.ListenAndServe(":8080", nil)
+
+
 }
 
-func getFuncLoadRead()  func(idxThread int,batchStamp int64) {
+func getFuncLoadRead()  func(idxThread int) {
 
 	//newOid := mongo.NewObjectId()
 	//minOid := mongo.MinObjectIdForTime( tStart.Add(-200 * time.Millisecond))
@@ -96,7 +117,12 @@ func getFuncLoadRead()  func(idxThread int,batchStamp int64) {
 
 
 
-	return func(idxThread int , batchStamp int64) {
+	return func(idxThread int ) {
+
+
+		if noRead > 0 {
+			return	
+		}
 
 		//fmt.Println( "loadRead: ", idxThread , batchStamp  )	
 		fctGetRecurseMsg := getRecurseMsg( fmt.Sprint("loadRead",idxThread," "))
@@ -164,7 +190,9 @@ func loadInsert(idxThread int , batchStamp int64){
 	if noInsert > 0 {
 		return	
 	}
-
+	
+	
+	fctUpdLag := fctGetUpdLag()
 	fctGetRecurseMsg := getRecurseMsg( fmt.Sprint("loadInsert",idxThread," "))
 
 	conn := getConn()
@@ -187,7 +215,7 @@ func loadInsert(idxThread int , batchStamp int64){
 		log.Print( fctGetRecurseMsg() )
 
 		incLoadCounter(i,idxThread)
-		_ =  updLoadTime( time.Now().Unix() ,0)	
+		_ =  fctUpdLag( time.Now().Unix() ,0)	
 		
 	}
 	fmt.Print(" -loadInsert",idxThread,"_finished- ")
@@ -198,6 +226,7 @@ func iterateTailCursor( oplogsubscription mongo.Collection , oplogSubscriptionCo
 
 
 	fctGetRecurseMsg := getRecurseMsg("recursion ")
+	fctUpdLag := fctGetUpdLag()
 
 	c := recoverTailableCursor()
 	
@@ -208,7 +237,7 @@ func iterateTailCursor( oplogsubscription mongo.Collection , oplogSubscriptionCo
 
 		if doBreak {
 
-			fmt.Println("going to sleep ",secondsDefer, " seconds")
+			fmt.Print("going to sleep ",secondsDefer, " seconds")
 			time.Sleep( secondsDefer * time.Second )
 			
 			if countNoNextValue < noNextValueMax {
@@ -247,9 +276,9 @@ func iterateTailCursor( oplogsubscription mongo.Collection , oplogSubscriptionCo
 				if ! ok {
 					log.Fatal("m[ts] not a valid timestamp")	
 				}
-				timeOfSaveOperation := int64(mongoSecsEarlier) >> 32
-				//_ =  updLoadTime( 0, time.Now().Unix() )	
-				_ =  updLoadTime( 0, timeOfSaveOperation )	
+				oplogOpTime := int64(mongoSecsEarlier) >> 32
+				_ =  fctUpdLag( 0, oplogOpTime )	
+				
 				
 				
 				var oid mongo.ObjectId = mongo.ObjectId("51dc1b9d419c")  // 12 chars
@@ -335,14 +364,14 @@ func checkCursor( c mongo.Cursor  ) ( bool,bool ){
 	if alive < 1 || hasNext == false {
 
 		if hasNext == false  {
-			log.Println( "has next returned false - going to sleep")
+			log.Print( " has next returned false - going to sleep")
 		}
 
 		if alive < 1  {
-			log.Println( fmt.Sprintf( "dead cursor id is %v", alive) )
+			log.Print( fmt.Sprintf( " dead cursor id is %v", alive) )
 		}
 
-		log.Println( fmt.Sprintf( "await is over - no next value no. %v of %v", countNoNextValue, noNextValueMax) )
+		log.Print( fmt.Sprintf( " await is over - no next value no. %v of %v", countNoNextValue, noNextValueMax) )
 
 		countNoNextValue++
 		if countNoNextValue > noNextValueMax {
@@ -554,8 +583,9 @@ func startTimerLog(){
 
 			if i % 40 == 0 {
 				fmt.Printf("\n")				
-				fmt.Printf("\n%10s%10s%10s%10s","seq_rd","insert","tail","lag")
-				fmt.Printf("\n================================================")
+				fmt.Printf("\n%10s%10s%10s%10s%10s","seq_rd","insert","tail","lag","sz_col")
+				fmt.Printf("\n")
+				fmt.Print( strings.Repeat("=",10*5) )
 			}
 
 			fmt.Print("\n")
@@ -563,41 +593,24 @@ func startTimerLog(){
 			writeTailInfo(now,timeStart, float64(intervalTimer))
 			
 			if i % 5 == 0 {
-				// db.getSiblingDB("local").oplog.rs.find({},{o:0}).sort({"$natural":-1})			
 
-/*
-				var m3 mongo.M
-				var err error
-
-				conn := getConn()
-				defer conn.Close()
-				oplog := getOplogCollection( conn, "", true)				
-
-				err = oplog.Find( mongo.M{} ).Sort( mongo.D{{"$natural", -1}} ).One(&m3)
-				if err != nil  && err != mongo.Done {
-					log.Fatal("query last oplog entry error:",err)
-				}
-
-				newestOplog,ok := m3["ts"].(mongo.Timestamp)
-				if ! ok {
-					fmt.Println("oplog did not contain a newest entry")				
-				}
-				
-				secsNewestOplog := int64(newestOplog)
-				secsNewestOplog  = secsNewestOplog >> 32
-				
-				lastTailedOplog := int64(mongoSecsEarlier) >> 32
-				fmt.Printf("%10v",secsNewestOplog - lastTailedOplog )			
-
-*/
-				lag :=  updLoadTime( 0 ,0 )	
+				fctUpdLag := fctGetUpdLag()
+				lag :=  fctUpdLag( 0 ,0 )	
 				fmt.Printf("%10v",lag)		
-				
+
+				s1, s2, err := ColSizes(false)
+				if err != nil {
+					fmt.Printf( "offers: %v  oplog %v \n", s1, s2)	
+				}
+				fmt.Printf("%10v",s1)			
 
 
 			} else {
 				fmt.Printf("%10s","-")			
+				fmt.Printf("%10s","-")			
 			}
+
+
 			
 			
 			i++
@@ -643,7 +656,7 @@ func writeLoadReadInfo() {
 			}
 			*/		
 			fmt.Printf("%10v",sum)			
-			arrayReadNew := make( []int64, LOAD_THREADS )
+			arrayReadNew := make( []int64, READ_THREADS )
 			chr <- arrayReadNew
 	
 		} else {
@@ -750,28 +763,59 @@ func incLoadCounter(i int64, idxThread int){
 }
 
 
-
-func updLoadTime(newSaveTime int64,  timeSaveOp int64)  int64{
-
-	if(newSaveTime > 1){
-	  atomic.StoreInt64( &lastSaveOperation, newSaveTime, )
-	  //fmt.Print(" save:" , atomic.LoadInt64(&lastSaveOperation) )
-	}
-
-	if(timeSaveOp > 1){
-	  atomic.StoreInt64( &timeXSaveOp, timeSaveOp, )
-	  //fmt.Print(" tail:" , atomic.LoadInt64(&timeXSaveOp) )
-	}
-
-
-  timeSaveOp =  atomic.LoadInt64(&lastSaveOperation)
-  //lastTail :=  atomic.LoadInt64(&timeXSaveOp)
+func fctGetUpdLag()  func (x,y int64)  string{
 
 	
-	return ( time.Now().Unix() - timeSaveOp)
+
+	return func (newInsertSaveTime int64,  newTimeOplog int64)  string{
 	
+		if  newInsertSaveTime > 1 {
+		  atomic.StoreInt64( &timeLastSaveOperation, newInsertSaveTime, )
+		}
+
+		if  newTimeOplog > 1   {
+			atomic.StoreInt64( &timeLastOplogOperation, newTimeOplog, )
+		}
+	
+	  effInsertSaveTime :=  atomic.LoadInt64(&timeLastSaveOperation)
+	  effTimeOplog      :=  atomic.LoadInt64(&timeLastOplogOperation)
+
+		
+		if lv[0] != effTimeOplog{
+			var lvTmp []int64 = make( []int64, lagSize )
+			for k,_ := range lv {
+				if k == 0 {
+					continue
+				}
+				lvTmp[k] = lv[k-1]
+			}
+			lv =lvTmp
+			lv[0] = effTimeOplog
+		}
+	
+		var comparisonBase int64 
+		//comparisonBase = tStart.Unix()
+		//comparisonBase = time.Now().Unix()
+		comparisonBase = effInsertSaveTime
+
+		tmp := int64(0)
+		msg := ""
+		for k,v := range lv {
+				if v > 1 {
+					tmp = comparisonBase - v
+				} else {
+					tmp = lv[k]
+				}
+				msg = fmt.Sprint( msg," ", tmp )
+		}
+	
+		
+		return msg
+		
+	}
+
+
 }
-
 
 
 func finalReport() (x int64, y int64){
@@ -910,7 +954,7 @@ func getFuncPartitionStart() func(threadIdx int) (x,y mongo.ObjectId){
 
 		return func(threadIdx int)(minOid,minOidThreadPartition mongo.ObjectId) {
 
-			partitionTimeDiff := time.Duration(threadIdx)*diffTime / time.Duration(LOAD_THREADS)
+			partitionTimeDiff := time.Duration(threadIdx)*diffTime / time.Duration(READ_THREADS)
 			//fmt.Println("diff",diffTime, partitionTimeDiff)				
 			timeMinThread := ctMin.Add( partitionTimeDiff )
 			minOidThread  := mongo.MinObjectIdForTime( timeMinThread )
@@ -926,10 +970,11 @@ func getFuncPartitionStart() func(threadIdx int) (x,y mongo.ObjectId){
 
 func handler(w http.ResponseWriter, r *http.Request) {
 	
+	
   //fmt.Fprintf(w, "Hi there, I love %s!", r.URL.Path[1:])
   
   path1 := r.URL.Path[1:]
-  if ! strings.HasPrefix( path1, "start" ){
+  if ! strings.HasPrefix( path1, "start" )  {
   	fmt.Fprintf(w, "==================================================\n")
   	fmt.Fprintf(w, "use /start to begin \n")
   	return
@@ -939,11 +984,22 @@ func handler(w http.ResponseWriter, r *http.Request) {
   fmt.Fprintf(w, strings.Repeat("     ",9000))
   fmt.Fprintf(w, "\n")
 
+	fmt.Println( "starting2" )	
+
+
+
+
+	//s1, s2, err := ColSizes(false)
+	//fmt.Printf( "offers: %v  oplog %v \n", s1, s2)	
+	//return	
 
 
 
 	conn := getConn()
 	defer conn.Close()
+
+
+
 
 	// Wrap connection with logger so that we can view the traffic to and from the server.
 	// conn = mongo.NewLoggingConn(conn, log.New(os.Stdout, "", 0), "")
@@ -963,13 +1019,16 @@ func handler(w http.ResponseWriter, r *http.Request) {
 
 	time.Sleep( 200 * time.Millisecond )
 	
-	//loadRead :=  getFuncLoadRead()
+	loadRead :=  getFuncLoadRead()
 	
 	for i:= 0; i< LOAD_THREADS; i++ {
 		batchStamp := int64(time.Now().Unix() )<<32  +  int64(i)*insertsPerThread
 		go loadInsert( i, batchStamp)
-		//go loadRead(   i, batchStamp)
 		
+	}
+
+	for i:= 0; i< READ_THREADS; i++ {
+		go loadRead(i)
 	}
 
 
@@ -977,7 +1036,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	arrayLoad := make( []int64, LOAD_THREADS )
 	chl <- arrayLoad
 
-	arrayRead := make( []int64, LOAD_THREADS )
+	arrayRead := make( []int64, READ_THREADS )
 	chr <- arrayRead
 
 	cht <- int64(0)
@@ -1000,12 +1059,94 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	readPerSec :=  int64(   math.Trunc(float64(readTotal)/float64(elapsed))   )
 
 	log.Print(     "==================================================")
-	log.Printf(    "ReadTotal-Read-Loaded-Tailed: %12v - %8v - %v- %v - %v%%", readTotal,readPerSec,loadTotal,tailTotal,percentage)
+	log.Printf(    "Read/s-Loaded-Tailed: %8v - %v - %v - %v%%", readPerSec,loadTotal,tailTotal,percentage)
 
 	fmt.Fprintf(w, "==================================================\n")
-	fmt.Fprintf(w, "ReadTotal-Read-Loaded-Tailed: %12v - %8v - %v- %v - %v%%", readTotal,readPerSec,loadTotal,tailTotal,percentage)
+	fmt.Fprintf(w, "Read/s-Loaded-Tailed: %8v - %v - %v - %v%%", readPerSec,loadTotal,tailTotal,percentage)
 
 
 
 }
 
+func ColSizes(printDetails bool)(size1,size2 int, err error){
+	
+
+	conn := getConn()
+	defer conn.Close()
+
+	var db mongo.Database
+	db = mongo.Database{conn, changelogDb, mongo.DefaultLastErrorCmd}
+	// 	err = db.Run(D{{"drop", collectionName}}, nil)
+	var m mongo.M
+	
+	err = db.Run(mongo.D{{"buildInfo", 1}}, &m)
+	if err != nil {
+		log.Fatal("runcommand buildInfo failed: ", err)
+	}
+	//fmt.Println(m)	
+	//fmt.Println("version: ", m["version"])	
+
+
+  //err = db.Run(mongo.D{{"dbStats", 1}}, &m)
+
+	db = mongo.Database{conn, "offer-db", mongo.DefaultLastErrorCmd}
+	err = db.Run(mongo.D{{"collStats","offers.test" },{"scale",(1024*1024) }}, &m)
+	if err != nil {
+		fmt.Println("collStats for offers.test failed: ", err)
+	} else {
+		if printDetails {
+			fmt.Println( m["ns"] , " size: ", m["storageSize"], " MB" )			
+		}
+		size1 = m["storageSize"].(int)
+	}
+
+
+	db = mongo.Database{conn, "local", mongo.DefaultLastErrorCmd}
+	err = db.Run(mongo.D{{"collStats","oplog.rs" },{"scale",(1024*1024) }}, &m)
+	if err != nil {
+		log.Fatal("oplog-stats failed: ", err)
+	} else {
+		if printDetails {
+			fmt.Println( m["ns"] , " size: ", m["storageSize"], " MB" )			
+		}
+		size2 = m["storageSize"].(int)
+	}
+
+	return
+	
+	
+}
+
+
+func OsFreeMemMB()(membytes int64, err error) {
+	membytes = 0
+	err = nil
+	cmd := exec.Command("tr", "a-z", "A-Z")
+	cmd = exec.Command("free")
+	//cmd.Stdin = strings.NewReader("some input")
+	cmd.Stdin = strings.NewReader("uselessArg")
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	err = cmd.Run()
+	if err != nil {
+		log.Fatal(err)
+	}
+	//fmt.Printf("\nfree says1: %q\n", out.String())
+	
+	s1 := out.String()
+	s2 := strings.Split(s1,"\n")
+	if( len(s2) > 1 ){
+		//fmt.Printf("\n free says2: %q\n", s2[1] ) 
+		words := strings.Fields( s2[1] )	
+		//fmt.Printf("\n free says3: %q\n", words[1] ) 
+		membytes,err = strconv.ParseInt( words[1],10,64 )
+		membytes = membytes >> 10		// MB
+		//membytes = membytes >> 10		// GB
+		
+		return
+	} else {
+		err = errors.New("could not parse output of free command - windows no worki")
+		return
+	}
+
+}
