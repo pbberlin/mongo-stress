@@ -1342,6 +1342,7 @@ func renderTemplate( w http.ResponseWriter,tname string , c map[string]string ){
 	
 }
 
+// commit it !!
 func Reverse(s string) string{
 	b := []byte(s)
 	for i:= 0; i < len(b)/2; i++ {
