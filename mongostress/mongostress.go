@@ -44,6 +44,8 @@ import (
 	"bytes" 
 	"strconv" 
 	"errors"
+	"encoding/json"	
+	"regexp"
 	
 )
 
@@ -97,9 +99,14 @@ var freeMem int64 = 0
 var csvRecord map[string]int64 = make(map[string]int64)
 var singleInstanceRunning bool = false
 
+var templates = template.Must( template.ParseFiles("main_header.html", "main_body.html",
+ "main_body_chart.html",
+ "main_footer.html") )
+
+var httpParamValidator = regexp.MustCompile("^[a-zA-Z0-9]+$")
+
 
 func main(){
-	
 
 	freeMemTmp, err := OsFreeMemMB()
 	if err == nil {
@@ -109,7 +116,7 @@ func main(){
 		log.Fatal(err)
 	}
 	
-	http.HandleFunc("/"       , elseHandler)
+	http.HandleFunc("/"      , elseHandler)
   http.HandleFunc("/data/" , dataHandler)
   http.HandleFunc("/start/", startHandler)
   http.HandleFunc("/stop/" , stopHandler)
@@ -126,7 +133,20 @@ func stopHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func dataHandler(w http.ResponseWriter, r *http.Request) {
- 	fmt.Fprintf(w, fmt.Sprint(csvRecord) ) 	
+
+ 	//fmt.Fprintf(w, fmt.Sprint(csvRecord) ) 	
+	
+ 	arrByte,err := json.Marshal( csvRecord ) 
+ 	if err != nil {
+		p2(w,"Marshal Map to Json - %v",err) 		
+ 	} else {
+  	//fmt.Fprintf(w, "%v", arrByte)
+  	//w.Header().Set("Content-type: application/json", "*")
+  	w.Header().Set("Content-type:", "application/json")
+  	w.Write(arrByte)
+ 	}
+
+ 	
 }
 
 
@@ -137,9 +157,10 @@ func tplHandler(w http.ResponseWriter, r *http.Request) {
 	  "Body" :"body msg test",
 	}
 
-	renderHtmlHeader(w, c)
-	renderHtmlBody(w, c)
-	renderHtmlFooter(w, c)
+	renderTemplatePrecompile( w ,"main_header", c )	
+	renderTemplatePrecompile( w ,"main_body", c )	
+	renderTemplateNewCompile( w ,"main_body_chart", c )	
+	renderTemplatePrecompile( w ,"main_footer", c )	
 
 }
 
@@ -147,28 +168,35 @@ func tplHandler(w http.ResponseWriter, r *http.Request) {
 func startHandler(w http.ResponseWriter, r *http.Request) {
 	const lenPath = len("/start/")
   params := r.URL.Path[lenPath:]
-
+  
+	if !httpParamValidator.MatchString( params ){
+		http.NotFound(w, r)
+		err := errors.New( fmt.Sprint("invalid http param", params)  )
+		p2(w,"%v",err)
+		return 
+	}
+	
 
 	c := map[string]string{
 		"Title":"Doing load",
 	  "Body" :  fmt.Sprintf("starting ... (%v)\n", params),
 	}
-	renderHtmlHeader(w, c)
+	renderTemplatePrecompile( w ,"main_header", c )	
 
 	
 	if( singleInstanceRunning ){
 		c = map[string]string{
 		  "Body" : fmt.Sprintf("already running ... (%v)\n", params),
 		}
-		renderHtmlBody(w, c)
-		renderHtmlFooter(w, c)
+		renderTemplatePrecompile( w ,"main_body", c )	
+		renderTemplatePrecompile( w ,"main_footer", c )	
 		return
 	} else {
 		singleInstanceRunning = true
 	}
 	
 	
-	renderHtmlBody(w, c)
+	renderTemplatePrecompile( w ,"main_body", c )	
 
 
 	conn := getConn()
@@ -180,16 +208,13 @@ func startHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Clear the log prefix for more readable output.
 	log.SetFlags(0)
-
 	//clearAll(conn)
-
 
 	startTimerLog()
 
 	colChangeLog, colCounterChangeLog := initDestinationCollections(conn)
 
 	go iterateTailCursor(colChangeLog, colCounterChangeLog)
-
 
 	time.Sleep( 200 * time.Millisecond )
 	
@@ -236,11 +261,11 @@ func startHandler(w http.ResponseWriter, r *http.Request) {
 
 
 	c["Body"] = "==================================================<br>\n"
-	renderHtmlBody(w, c)
+	renderTemplatePrecompile( w ,"main_body", c )	
 	c["Body"] = fmt.Sprintf( "Read/s-Loaded-Tailed: %8v - %v - %v - %v%%", readPerSec,loadTotal,tailTotal,percentage ) 
-	renderHtmlBody(w, c)
+	renderTemplatePrecompile( w ,"main_body", c )	
 
-	renderHtmlFooter(w, c)
+	renderTemplatePrecompile( w ,"main_footer", c )	
 
 	singleInstanceRunning = false
 
@@ -1314,20 +1339,18 @@ func p2(w http.ResponseWriter, f string, args ... interface{} ){
 	
 }
 
-func renderHtmlHeader(w http.ResponseWriter, c map[string]string){
-	renderTemplate(w,"main_header",c)
+
+func renderTemplatePrecompile( w http.ResponseWriter,tname string , c map[string]string ){
+
+	err := templates.ExecuteTemplate(w, tname + ".html", c)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+	Flush1(w)
+	
 }
 
-func renderHtmlBody(w http.ResponseWriter, c map[string]string){
-	renderTemplate(w,"main_body",c)
-}
-
-
-func renderHtmlFooter(w http.ResponseWriter, c map[string]string){
-	renderTemplate(w,"main_footer",c)
-}
-
-func renderTemplate( w http.ResponseWriter,tname string , c map[string]string ){
+func renderTemplateNewCompile( w http.ResponseWriter,tname string , c map[string]string ){
 
 	t, err := template.ParseFiles(tname + ".html")
 	if err != nil {
@@ -1339,8 +1362,9 @@ func renderTemplate( w http.ResponseWriter,tname string , c map[string]string ){
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 	Flush1(w)
-	
+
 }
+
 
 // commit it !!
 func Reverse(s string) string{

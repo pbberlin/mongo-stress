@@ -1,0 +1,215 @@
+<div id='chart-area-1'  style='display:block; 
+	min-width: 600px; height: 400px; 
+	margin: 100 auto; 
+	background-color:#aaa; 
+	aaoverflow:hidden;
+	float:left;
+'>
+</div>
+<div id='chart-area-2'  style='display:block; 
+	min-width: 200px; height: 400px; 
+	background-color:#def; 
+	aaoverflow:hidden;
+	float:left;
+'>{{.SomeKey}}
+</div>
+
+
+	<script>
+
+		var js_dry_run = false;
+
+		var cntrGotPerformanceCur   = 0;
+		var cntrGotPerformanceMax   = 100*100*60;		
+
+		var timer_id_1 = 0;
+
+		var jsonMap = {};												// holds current performance data
+		jsonMap["Reads per Sec"] = 10000
+		jsonMap["Inserts per Sec"] = 3000
+		jsonMap["Tails per Sec"] = 200
+
+
+		function reset_max(){ 
+			cntrGotPerformanceMax = 2;
+			alert('Ajax requests stopped: ' + cntrGotPerformanceMax );
+		}
+
+
+		function getPerformanceData(){ 
+			cntrGotPerformanceCur++;
+			if( cntrGotPerformanceCur >= cntrGotPerformanceMax ){
+				cntrGotPerformanceCur = 'finished'
+				clearInterval(timer_id_1);
+				return;
+			} 
+			if( js_dry_run ) return;
+			$.ajax({
+				url: '/data/?hostname=r900&',
+				cache: false
+			}).done(function( argJsonMap ) {
+				var keyVal = ""
+				var countKeys = 0
+				$.each( argJsonMap, function(key, val) { keyVal = key + ":" + val + "<br>" + keyVal ;  countKeys++});
+				if( countKeys > 0 ) {
+					jsonMap = argJsonMap
+				}
+				var prepend = '<br>Durchlauf ' + cntrGotPerformanceCur + ' Anz.' + countKeys + '<br>' + keyVal;
+				$('#chart-area-2').prepend( prepend );
+
+			});
+		}
+
+		jQuery(document).ready(function($) {
+
+			getPerformanceData();
+			timer_id_1   = setInterval('getPerformanceData()',1000);
+
+
+		});
+							
+	</script>
+	
+	
+	
+	<script>
+	$( function(){
+		//return;
+		$(document).ready(function() {
+			Highcharts.setOptions({
+				global: {
+					useUTC: false
+				}
+			});
+		
+			var chart;
+			$('#chart-area-1').highcharts({
+				title: {
+					text: ''
+				},
+				chart: {
+					type: 'spline',
+					animation: Highcharts.svg, // don't animate in old IE
+					marginRight: 10,
+					marginLeft: 210,
+					events: {
+						load: function(){
+
+							var series0 = this.series[0];
+							var series1 = this.series[1];
+							var series2 = this.series[2];
+
+							setInterval( function(){
+								var x  = (new Date()).getTime(); // current time
+								var y0 = jsonMap["Reads per Sec"] / 1000;
+								var y1 = jsonMap["Inserts per Sec"] / 10;
+								var y2 = jsonMap["Tails per Sec"] + 2;
+
+								series0.addPoint([x, y0], true, true);
+								series1.addPoint([x, y1], true, true);
+								series2.addPoint([x, y2], true, true);
+
+							}, 1000);
+						}
+					}
+				},
+				xAxis: {
+					type: 'datetime',
+					tickPixelInterval: 150
+				},
+				yAxis: {
+					title: {
+						text: 'versch.'
+					},
+					plotLines: [{
+						value: 0,
+						width: 1,
+						color: '#808080'
+					}]
+				},
+				tooltip: {
+					formatter: function() {
+							return '<b>'+ this.series.name +'</b><br/>'+
+							Highcharts.dateFormat('%Y-%m-%d %H:%M:%S', this.x) +'<br/>'+
+							Highcharts.numberFormat(this.y, 2);
+					}
+				},
+
+ 				legend: {
+					layout: 'vertical',
+					align: 'left',
+					verticalAlign: 'top',
+					x: -10,
+					y: 100,
+					borderWidth: 0
+				},
+				exporting: {
+					enabled: false
+				},
+				series: [{
+					name: 'Reads pro Sekunde',
+					marker: {
+						radius: 0
+					},
+					color: "#F60",					
+					data: (function(){
+						// generate an array of random data
+						var data = [],
+							time = (new Date()).getTime(),
+							i;
+						for( i = -19; i <= 0; i++ ){
+							data.push({
+								x: time + i * 1000,
+								y: 2000 + 1000*Math.random()
+							});
+						}
+						return data;
+					})()
+				},
+				{
+					name: 'Inserts pro Sekunde',
+					lineWidth: 2,
+					marker: {
+						radius: 0
+					},
+					color: "#00377B",
+					data: (function(){
+						// generate an array of random data
+						var data = [],
+							time = (new Date()).getTime(),
+							i;
+						for( i = -19; i <= 0; i++ ){
+							data.push({
+								x: time + i * 1000,
+								y: 1000 + 1000*Math.random()
+							});
+						}
+						return data;
+					})()
+				},				
+				{
+					name: 'Tails pro Sekunde',
+					marker: {
+						radius: 0
+					},
+					data: (function(){
+						// generate an array of random data
+						var data = [],
+							time = (new Date()).getTime(),
+							i;
+						for( i = -19; i <= 0; i++ ){
+							data.push({
+								x: time + i * 1000,
+								y: 200 + 100*Math.random()
+							});
+						}
+						return data;
+					})()
+				},				
+				]
+			});
+		});
+		
+	});		
+		
+	</script>
