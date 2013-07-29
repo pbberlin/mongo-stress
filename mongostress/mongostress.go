@@ -3,7 +3,7 @@ package main
 /*
 
 function strRepeat ( str, num ){
-    return new Array( num + 1 ).join( str);
+	return new Array( num + 1 ).join( str);
 }
 
 alert( "string to repeat\n".repeat( 4 ) );
@@ -50,15 +50,15 @@ import (
 )
 
 var   countNoNextValue  int = 0
-const noNextValueMax    int = 2 
+const noNextValueMax	int = 2 
 
 const secondsDefer = 4							// upon cursor not found error - amount of sleep  - 
 const secondsDeferTailCursor = 1		// after sleep - set back additional x seconds
 const noInsert = 0
 const noRead   = 0
 
-const LOAD_THREADS     = 8
-const READ_THREADS     = 2
+var LOAD_THREADS	int = 8
+var READ_THREADS	int = 2
 
 const insertsPerThread  = int64(4000)  // if oplog is not big enough, causes "cursor not found"
 
@@ -80,12 +80,12 @@ var arrayLoadTotal = make([]int64 ,LOAD_THREADS)
 var chr chan []int64 = make(chan []int64 ,1)			// channel read
 var arrayReadTotal = make([]int64 ,READ_THREADS)
 
-var cht chan int64   = make(chan   int64 ,1)      // channel cursor tail
+var cht chan int64   = make(chan   int64 ,1)	  // channel cursor tail
 var tailTotal = int64(0)
 
-var cq  chan int     = make(chan   int   )        // channel quit
+var cq  chan int	 = make(chan   int   )		// channel quit
 
-var	tsStart int64      = time.Now().Unix()
+var	tsStart int64	  = time.Now().Unix()
 var	tStart  time.Time  = time.Now()
 
 
@@ -116,44 +116,72 @@ func main(){
 		log.Fatal(err)
 	}
 	
-	http.HandleFunc("/"      , elseHandler)
+	http.HandleFunc("/"	  , elseHandler)
   http.HandleFunc("/data/" , dataHandler)
-  http.HandleFunc("/start/", startHandler)
+  http.HandleFunc("/start/", subClassOfHandlerFunc(startHandler) )
   http.HandleFunc("/stop/" , stopHandler)
-  http.HandleFunc("/tpl/"  , tplHandler)
+  http.HandleFunc("/tpl/"  , subClassOfHandlerFunc(tplHandler) )
+  
+  //panic(http.ListenAndServe(":8080", http.FileServer(http.Dir("/home/peter.buchmann/ws_go/src/github.com/pbberlin/g1/mongostress"))))
   http.ListenAndServe(":8080", nil)
 
 
 }
 
+/* challenging construct from http://golang.org/doc/articles/wiki/
+		essentially "subclassing" an ordinary http handler function
+		- enhancing it with functionality, common to all handlers
+		- RETURNING normal http.HandlerFunc
+		- but CALLING extended own handler func
+		
+		TODO: lenPath needs to be made dynamic
+*/
+func subClassOfHandlerFunc( fn func(http.ResponseWriter, *http.Request, string)  ) http.HandlerFunc {
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		
+		const lenPath = len("/start/")
+	  params := r.URL.Path[lenPath:]
+	  
+		if !httpParamValidator.MatchString( params ){
+			http.NotFound(w, r)
+			err := errors.New( fmt.Sprint("invalid http param", r.URL.Path)  )
+			p2(w,"%v",err)
+			return 
+		}
+		fn(w, r, params)
+	}
+	
+}
+
+
+
 func stopHandler(w http.ResponseWriter, r *http.Request) {
   	p2( w, "received quit signal by browser: %v", 1)
   	Flush1(w)
+  	time.Sleep( 50 * time.Millisecond )
   	os.Exit(1)
 }
 
+
+/* sending current csv column as JSON to client */
 func dataHandler(w http.ResponseWriter, r *http.Request) {
 
- 	//fmt.Fprintf(w, fmt.Sprint(csvRecord) ) 	
-	
  	arrByte,err := json.Marshal( csvRecord ) 
  	if err != nil {
 		p2(w,"Marshal Map to Json - %v",err) 		
  	} else {
-  	//fmt.Fprintf(w, "%v", arrByte)
-  	//w.Header().Set("Content-type: application/json", "*")
   	w.Header().Set("Content-type:", "application/json")
   	w.Write(arrByte)
  	}
-
  	
 }
 
 
-func tplHandler(w http.ResponseWriter, r *http.Request) {
+func tplHandler(w http.ResponseWriter, r *http.Request, params string) {
 	
 	c := map[string]string{
-		"Title":"test title...",
+		"Title": fmt.Sprint("test title ...",params ),
 	  "Body" :"body msg test",
 	}
 
@@ -165,16 +193,7 @@ func tplHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 
-func startHandler(w http.ResponseWriter, r *http.Request) {
-	const lenPath = len("/start/")
-  params := r.URL.Path[lenPath:]
-  
-	if !httpParamValidator.MatchString( params ){
-		http.NotFound(w, r)
-		err := errors.New( fmt.Sprint("invalid http param", params)  )
-		p2(w,"%v",err)
-		return 
-	}
+func startHandler(w http.ResponseWriter, r *http.Request, params string) {
 	
 
 	c := map[string]string{
@@ -195,8 +214,6 @@ func startHandler(w http.ResponseWriter, r *http.Request) {
 		singleInstanceRunning = true
 	}
 	
-	
-	renderTemplatePrecompile( w ,"main_body", c )	
 
 
 	conn := getConn()
@@ -239,6 +256,12 @@ func startHandler(w http.ResponseWriter, r *http.Request) {
 	chr <- arrayRead
 
 	cht <- int64(0)
+
+
+	renderTemplateNewCompile( w ,"main_body_chart", c )	
+	Flush1(w)
+	Flush1(w)
+	Flush1(w)
 	
 	
 	// the tailing cursor is the one who sends the quit signal
@@ -249,19 +272,11 @@ func startHandler(w http.ResponseWriter, r *http.Request) {
 	tsFinish := time.Now().Unix()
 	elapsed  := (tsFinish-tsStart)
 	log.Println("tsFinish: ",tsFinish, " Dauer: " , elapsed )
-
-
 	loadTotal,readTotal :=  finalReport()
-
 	var percentage float64 = float64(tailTotal)/float64(loadTotal)
 	percentage = math.Trunc(percentage*1000)/10
-	
 	readPerSec :=  int64(   math.Trunc(float64(readTotal)/float64(elapsed))   )
-
-
-
 	c["Body"] = "==================================================<br>\n"
-	renderTemplatePrecompile( w ,"main_body", c )	
 	c["Body"] = fmt.Sprintf( "Read/s-Loaded-Tailed: %8v - %v - %v - %v%%", readPerSec,loadTotal,tailTotal,percentage ) 
 	renderTemplatePrecompile( w ,"main_body", c )	
 
@@ -275,7 +290,7 @@ func elseHandler(w http.ResponseWriter, r *http.Request) {
 	
   path1 := r.URL.Path[1:]
 
-	commands := map[string]string{ 
+	validCommands := map[string]string{ 
 		"start": "start" ,
 		"stop":  "stop" ,
 		"tpl":   "tpl" ,
@@ -286,7 +301,7 @@ func elseHandler(w http.ResponseWriter, r *http.Request) {
 	msgCommands := ""
   var isCommand bool = false
   
-  for k,_ := range commands {
+  for k,_ := range validCommands {
 	  if strings.HasPrefix( path1, k )  {
 	  	isCommand = true
 	  }
@@ -327,7 +342,7 @@ func getConn() mongo.Conn {
 func getCollection(conn mongo.Conn, nameDb string, nameCol string  )(col mongo.Collection){
 	
 		tmpDb  := mongo.Database{conn, nameDb, mongo.DefaultLastErrorCmd}	// get a database object
-		col    = tmpDb.C(nameCol)  
+		col	= tmpDb.C(nameCol)  
 		return
 	
 }
@@ -343,7 +358,7 @@ func getOplogCollection(conn mongo.Conn, colName string, silent bool) mongo.Coll
 		log.Print(  fmt.Sprint("\n\n==(re-)connect_to_",colName,"== ... ") )
 	}
 	dbOplog  := mongo.Database{conn, "local", mongo.DefaultLastErrorCmd}	// get a database object
-	oplog    := dbOplog.C( colName )  // get collection
+	oplog	:= dbOplog.C( colName )  // get collection
 	
 	return oplog
 
@@ -613,7 +628,7 @@ func iterateTailCursor( oplogsubscription mongo.Collection , oplogSubscriptionCo
 				fmt.Print( fctfuncRecurseMsg() )
 			}
 			if innerMap != nil { 
-				printMap(innerMap,true,"      inner map: ") 
+				printMap(innerMap,true,"	  inner map: ") 
 			}
 
 
@@ -805,7 +820,7 @@ func writeLoadReadInfo() {
 			}
 			*/		
 			fmt.Printf("%10v",sum)			
-			csvRecord["Reads per Sec"] = sum
+			csvRecord["K Reads per Sec"] = sum / 1000
 			arrayReadNew := make( []int64, READ_THREADS )
 			chr <- arrayReadNew
 	
@@ -828,7 +843,7 @@ func writeLoadReadInfo() {
 			}
 			*/
 			fmt.Printf("%10v",sum)			
-			csvRecord["Inserts per Sec"] = sum
+			csvRecord["Inserts per Sec * 10"] = sum / 10
 			arrayLoadNew := make( []int64, LOAD_THREADS )
 			chl <- arrayLoadNew
 	
@@ -931,7 +946,7 @@ func funcTailCursorLag()  func (x,y int64) (int64,string){
 		}
 	
 	  effInsertSaveTime :=  atomic.LoadInt64(&timeLastSaveOperation)
-	  effTimeOplog      :=  atomic.LoadInt64(&timeLastOplogOperation)
+	  effTimeOplog	  :=  atomic.LoadInt64(&timeLastOplogOperation)
 
 		
 		if lv[0] != effTimeOplog{
@@ -1030,10 +1045,10 @@ func loadInsert(idxThread int , batchStamp int64){
 	for i:=batchStamp ; i < batchStamp+insertsPerThread; i++ {
 		
 		err := colOffers.Insert(mongo.M{"offerId": i,
-			 "shopId"     : 20, 
+			 "shopId"	 : 20, 
 			 "lastSeen"   : int32(time.Now().Unix()) ,
 			 "categoryId" : 15 ,
-			 "title":       fmt.Sprint("title",i) ,
+			 "title":	   fmt.Sprint("title",i) ,
 			 //"description": strings.Repeat( fmt.Sprint("description",i), 31),
 			 "description": "new Array( 44 ).join( \"description\")",
 		})
@@ -1294,41 +1309,41 @@ func printMap( m mongo.M, short bool, prefix string ){
 func funcRecurseMsg(cmsg string) func() string {
 	
 
-    ctr := 0
+	ctr := 0
 
-    var cmsgl int = len(cmsg)
-    msg := ""
-    csr := 0
+	var cmsgl int = len(cmsg)
+	msg := ""
+	csr := 0
 
-    return func() string {
+	return func() string {
 
-    		ctr++
-    		if mod := ctr % 100; mod != 0{
-    			return ""	
-    		}
+			ctr++
+			if mod := ctr % 100; mod != 0{
+				return ""	
+			}
 
-		    if  len(msg) >= len(cmsg) {
-		    	msg = ""
-		    }
-    		xlen := len(msg)
-    		ylen := len(msg)+1
-        msg = fmt.Sprint(msg, cmsg[xlen:ylen])
-        
-		    if  csr >= cmsgl {
-		    	csr = 0
-		    }
-        msg = fmt.Sprint("", cmsg[csr:csr+1])
-		    csr++
+			if  len(msg) >= len(cmsg) {
+				msg = ""
+			}
+			xlen := len(msg)
+			ylen := len(msg)+1
+		msg = fmt.Sprint(msg, cmsg[xlen:ylen])
+		
+			if  csr >= cmsgl {
+				csr = 0
+			}
+		msg = fmt.Sprint("", cmsg[csr:csr+1])
+			csr++
 
 				return ""
-        return fmt.Sprint(msg)
-        return fmt.Sprint(ctr, msg,"-",csr,"-",csr+1,"-\n")
-    }
+		return fmt.Sprint(msg)
+		return fmt.Sprint(ctr, msg,"-",csr,"-",csr+1,"-\n")
+	}
 }
 
 func Flush1(w http.ResponseWriter){
 	
-	fmt.Fprintf(w, strings.Repeat("     ",9000))	
+	fmt.Fprintf(w, strings.Repeat("	 ",9000))	
 	
 }
 func p2(w http.ResponseWriter, f string, args ... interface{} ){

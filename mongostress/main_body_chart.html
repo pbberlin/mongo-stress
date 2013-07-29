@@ -1,3 +1,14 @@
+<style>
+	a:link, a:visited, a:hover, a:active {
+		aafont-weight:normal	;
+		text-decoration:none	
+	}
+</style>
+
+<a href='#'  onclick='javascript:cmdStart();return false;' accesskey='s' ><u>s</u>tart</a><br>
+<a href='#'  onclick='javascript:cmdStop() ;return false;' accesskey='p' >sto<u>p</u> Loading</a><br>
+<a href='#'  onclick='javascript:cmChartingStop() ;return false;' accesskey='p' >stop <u>C</u>harting</u></a><br>
+
 <div id='chart-area-1'  style='display:block; 
 	min-width: 600px; height: 400px; 
 	margin: 100 auto; 
@@ -23,16 +34,78 @@
 		var cntrGotPerformanceMax   = 100*100*60;		
 
 		var timer_id_1 = 0;
+		var timer_id_chart = 0;
 
 		var jsonMap = {};												// holds current performance data
-		jsonMap["Reads per Sec"] = 10000
-		jsonMap["Inserts per Sec"] = 3000
-		jsonMap["Tails per Sec"] = 200
+		jsonMap["K Reads per Sec"] = 0;
+		jsonMap["Inserts per Sec * 10"] = 0;
+		jsonMap["Tails per Sec"] = 0;
+		jsonMap["Lag of Tail Cursor"] = 0;
+		jsonMap["Hot Set to SysRAM"] = 0;
 
+		var arrColors = new Array();
+		arrColors[0] = "#00377B";
+		arrColors[1] = "#F60";
+		arrColors[2] = "#647447";
+		arrColors[3] = "#EE0000";
+		arrColors[4] = "#529933";
+		
 
-		function reset_max(){ 
+		function generateSeriesInitData(){
+				// generate an array of random data
+				var data = [],
+					time = (new Date()).getTime(),
+					i;
+				for( i = -19; i <= 0; i++ ){
+					data.push({
+						x: time + i * 1000,
+						y: 10*Math.random()
+					});
+				}
+				return data;
+			}
+
+		
+		
+		// init chart series
+		var seriesArray = new Array();
+		var i = 0
+		$.each( jsonMap, function(key, val) { 
+				var loopMap = {};		
+				loopMap["name"] = key
+
+				loopMap["marker"] = {radius: 0 };
+				var modu = i % arrColors.length;
+				loopMap["color"] = arrColors[modu];
+				loopMap["data"] = generateSeriesInitData();
+				
+				seriesArray[i] = loopMap;
+				i++;
+			}
+		);
+		
+		
+
+		
+		
+		function cmdStart(){ 
+			$.ajax({
+				url: '/start/someid',
+				cache: false
+			})		
+		}
+		function cmdStop(){ 
+			$.ajax({
+				url: '/stop/someid',
+				cache: false
+			})
+			cmChartingStop();
+		}
+
+		function cmChartingStop(){ 
+			clearInterval(timer_id_chart);			
 			cntrGotPerformanceMax = 2;
-			alert('Ajax requests stopped: ' + cntrGotPerformanceMax );
+			//alert('Ajax requests stopped: ' + cntrGotPerformanceMax );
 		}
 
 
@@ -94,21 +167,27 @@
 					marginLeft: 210,
 					events: {
 						load: function(){
-
-							var series0 = this.series[0];
-							var series1 = this.series[1];
-							var series2 = this.series[2];
-
-							setInterval( function(){
+							var arrSeries = this.series;
+							timer_id_chart = setInterval( function(){
 								var x  = (new Date()).getTime(); // current time
-								var y0 = jsonMap["Reads per Sec"] / 1000;
-								var y1 = jsonMap["Inserts per Sec"] / 10;
-								var y2 = jsonMap["Tails per Sec"] + 2;
-
-								series0.addPoint([x, y0], true, true);
-								series1.addPoint([x, y1], true, true);
-								series2.addPoint([x, y2], true, true);
-
+								for( var j=0; j < arrSeries.length; j++ ){
+									var lpName = arrSeries[j]["name"];
+									
+									var y = 0
+									if( lpName in jsonMap ){
+										y = jsonMap[ lpName ] ;
+									}	else {
+										var prevData = arrSeries[j].data;
+										if( prevData.length > 1 ){
+											y = prevData[prevData.length-1]["y"]
+											//$('#chart-area-2').prepend( "<br>pdp" + cntrGotPerformanceCur + lpName + ":"+ y  );
+										} else {
+											y = 0;
+										}
+									}
+									arrSeries[j].addPoint([x, y], true, true);	
+									
+								}
 							}, 1000);
 						}
 					}
@@ -146,67 +225,7 @@
 				exporting: {
 					enabled: false
 				},
-				series: [{
-					name: 'Reads pro Sekunde',
-					marker: {
-						radius: 0
-					},
-					color: "#F60",					
-					data: (function(){
-						// generate an array of random data
-						var data = [],
-							time = (new Date()).getTime(),
-							i;
-						for( i = -19; i <= 0; i++ ){
-							data.push({
-								x: time + i * 1000,
-								y: 2000 + 1000*Math.random()
-							});
-						}
-						return data;
-					})()
-				},
-				{
-					name: 'Inserts pro Sekunde',
-					lineWidth: 2,
-					marker: {
-						radius: 0
-					},
-					color: "#00377B",
-					data: (function(){
-						// generate an array of random data
-						var data = [],
-							time = (new Date()).getTime(),
-							i;
-						for( i = -19; i <= 0; i++ ){
-							data.push({
-								x: time + i * 1000,
-								y: 1000 + 1000*Math.random()
-							});
-						}
-						return data;
-					})()
-				},				
-				{
-					name: 'Tails pro Sekunde',
-					marker: {
-						radius: 0
-					},
-					data: (function(){
-						// generate an array of random data
-						var data = [],
-							time = (new Date()).getTime(),
-							i;
-						for( i = -19; i <= 0; i++ ){
-							data.push({
-								x: time + i * 1000,
-								y: 200 + 100*Math.random()
-							});
-						}
-						return data;
-					})()
-				},				
-				]
+				series: seriesArray	
 			});
 		});
 		

@@ -67,4 +67,4 @@ sleep 2
 ps -A | grep mongod
 
 
-echo ~/mongo/program/bin/mongo --shell --port 27001 start.js
+echo ~/mongo/program/bin/mongo --shell --port 27001 ~/mongo/program/bin/start.js
