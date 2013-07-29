@@ -57,16 +57,11 @@ const secondsDeferTailCursor = 1		// after sleep - set back additional x seconds
 
 
 var LOADER_COUNTER  = int32(0)
-var LOADERS_CONC_MAX=	int32(2)
-var ARR_LOAD_TOT = make( []int64 ,LOADERS_CONC_MAX )
-var ARR_LOAD_CUR = make( []int64, LOADERS_CONC_MAX )
-var chl chan []int64 = make(chan []int64 ,1)      // channel load
-
-
+var MAX_CONC_LOADERS=	int32(2)
 
 var READ_THREADS	int = 2
 
-const insertsPerThread  = int64(400)  // if oplog is not big enough, causes "cursor not found"
+const insertsPerThread  = int64(4000)  // if oplog is not big enough, causes "cursor not found"
 
 
 const outputLevel = 0
@@ -84,6 +79,8 @@ var chr chan []int64 = make(chan []int64 ,1)      // channel read
 var arrayReadTotal = make([]int64 ,READ_THREADS)
 
 
+var chl chan []int64 = make(chan []int64 ,1)      // channel load
+var arrayLoadTotal = make([]int64 ,MAX_CONC_LOADERS)
 
 
 var cht chan int64   = make(chan   int64 ,1)	    // channel cursor tail
@@ -110,7 +107,7 @@ var templates = template.Must( template.ParseFiles("main_header.html", "main_bod
  "main_body_chart.html",
  "main_footer.html") )
 
-var httpParamValidator = regexp.MustCompile("^[a-zA-Z0-9/]+$")
+var httpParamValidator = regexp.MustCompile("^[a-zA-Z0-9]+$")
 
 
 func main(){
@@ -128,7 +125,6 @@ func main(){
   http.HandleFunc("/start/", subClassOfHandlerFunc(startHandler) )
   http.HandleFunc("/stop/" , stopHandler)
   http.HandleFunc("/tpl/"  , subClassOfHandlerFunc(tplHandler) )
-  http.HandleFunc("/changeLoadThreads/" , subClassOfHandlerFunc(changeLoadThreads))
   
   //panic(http.ListenAndServe(":8080", http.FileServer(http.Dir("/home/peter.buchmann/ws_go/src/github.com/pbberlin/g1/mongostress"))))
   http.ListenAndServe(":8080", nil)
@@ -162,40 +158,6 @@ func subClassOfHandlerFunc( fn func(http.ResponseWriter, *http.Request, string) 
 	
 }
 
-func elseHandler(w http.ResponseWriter, r *http.Request) {
-	
-  path1 := r.URL.Path[1:]
-
-	validCommands := map[string]string{ 
-		"start": "start" ,
-		"stop":  "stop" ,
-		"tpl":   "tpl" ,
-		"data":  "data" ,
-		"changeLoadThreads": "changeLoadThreads",
-		"command-without-handler":  "bla" ,
-	}
-
-	msgCommands := ""
-  var isCommand bool = false
-  
-  for k,_ := range validCommands {
-	  if strings.HasPrefix( path1, k )  {
-	  	isCommand = true
-	  }
-	  msgCommands = fmt.Sprint( msgCommands, k , " ")
-  }
-  
-  if ! isCommand {
-  	fmt.Fprintf(w, "use commands %vto begin \n",msgCommands)	
-  	return
-  } else {
-  	fmt.Fprintf(w, "valid command \"%v\" \n- but no handler available\n",path1)	
-  }
-  
-	http.Redirect(w, r, "/tpl/", http.StatusFound)
-  
-}
-
 
 
 func stopHandler(w http.ResponseWriter, r *http.Request) {
@@ -205,42 +167,6 @@ func stopHandler(w http.ResponseWriter, r *http.Request) {
   	os.Exit(1)
 }
 
-
-func changeLoadThreads(w http.ResponseWriter, r *http.Request, dummy string) {
-
-		const lenPath = len("/changeLoadThreads/")
-	  params := r.URL.Path[lenPath:]
-	
-  	
-  	newLoadersConcMax,err := strconv.ParseInt( params,10,32 )
-  	if err != nil {
-	  	p2( w, "could not parse '%v'- no change<br>\n", params)
-  	} else {
-	  	p2( w, "changeLoadThreads switched from %v to %v \n", LOADERS_CONC_MAX, params)
-  		if( int32(newLoadersConcMax) > LOADERS_CONC_MAX ){
-  			ARR_LOAD_CUR, ok := (<- chl)
-		  	p2( w, "cur len %v \n", len(ARR_LOAD_CUR) )
-				if ok {
-					ARR_LOAD_TOT = make( []int64 , newLoadersConcMax )
-					ARR_LOAD_CUR = make( []int64 , newLoadersConcMax )
-				} else {
-					log.Fatal("error reading from chl 4")
-				}
-		  	p2( w, "new len %v \n", len(ARR_LOAD_CUR) )
-				LOADERS_CONC_MAX=	int32(newLoadersConcMax)
-				chl <- ARR_LOAD_CUR				
-				
-  		} else {
-  			ARR_LOAD_CUR, _ := (<- chl)
-				LOADERS_CONC_MAX=	int32(newLoadersConcMax)
-				chl <- ARR_LOAD_CUR				
-  		}
-
-
-
-  	}
-  	
-}
 
 
 /* sending current csv column as JSON to client */
@@ -321,7 +247,8 @@ func startHandler(w http.ResponseWriter, r *http.Request, params string) {
 
 
 	// no throwing the "syncing" balls onto the field:
-	chl <- ARR_LOAD_CUR
+	arrayLoad := make( []int64, MAX_CONC_LOADERS )
+	chl <- arrayLoad
 
 	arrayRead := make( []int64, READ_THREADS )
 	chr <- arrayRead
@@ -357,27 +284,38 @@ func startHandler(w http.ResponseWriter, r *http.Request, params string) {
 
 }
 
+func elseHandler(w http.ResponseWriter, r *http.Request) {
+	
+  path1 := r.URL.Path[1:]
 
-func spawnInserts(){
-
-	monotonicInc := int32(0)
-	for {
-		
-		lc := atomic.LoadInt32( &LOADER_COUNTER )
-		if lc > LOADERS_CONC_MAX-1 {
-			time.Sleep( 500 * time.Millisecond )
-			continue
-		}
-		
-
-		atomic.AddInt32( &LOADER_COUNTER, 1, )
-		batchStamp := int64(time.Now().Unix() )<<32  +  int64(monotonicInc)*insertsPerThread
-		go loadInsert( lc, batchStamp)
-		monotonicInc++
+	validCommands := map[string]string{ 
+		"start": "start" ,
+		"stop":  "stop" ,
+		"tpl":   "tpl" ,
+		"data":  "data" ,
+		"command-without-handler":  "bla" ,
 	}
 
+	msgCommands := ""
+  var isCommand bool = false
+  
+  for k,_ := range validCommands {
+	  if strings.HasPrefix( path1, k )  {
+	  	isCommand = true
+	  }
+	  msgCommands = fmt.Sprint( msgCommands, k , " ")
+  }
+  
+  if ! isCommand {
+  	fmt.Fprintf(w, "use commands %vto begin \n",msgCommands)	
+  	return
+  } else {
+  	fmt.Fprintf(w, "valid command \"%v\" \n- but no handler available\n",path1)	
+  }
+  
+	http.Redirect(w, r, "/tpl/", http.StatusFound)
+  
 }
-
 
 
 
@@ -585,7 +523,8 @@ func getTailCursor( oplog mongo.Collection ) mongo.Cursor  {
 func iterateTailCursor( oplogsubscription mongo.Collection , oplogSubscriptionCounter mongo.Collection ){
 
 
-	fctfuncRecurseMsg   := funcRecurseMsg("recursion ")
+	fctfuncRecurseMsg := funcRecurseMsg("recursion ")
+	fcTailCursorLag   := funcTailCursorLag()
 
 	c := recoverTailCursor()
 	
@@ -636,7 +575,7 @@ func iterateTailCursor( oplogsubscription mongo.Collection , oplogSubscriptionCo
 					log.Fatal("m[ts] not a valid timestamp")	
 				}
 				oplogOpTime := int64(mongoSecsEarlier) >> 32
-				_,_ =  tailCursorLogInc( 0, oplogOpTime )	
+				_,_ =  fcTailCursorLag( 0, oplogOpTime )	
 				
 				
 				
@@ -829,7 +768,8 @@ func startTimerLog(){
 			// collection size and oplog lag every y secs
 			if i % 5 == 0 {
 
-				lastLag, lagTrail  :=  tailCursorLagReport()
+				fcTailCursorLag := funcTailCursorLag()
+				lastLag, lagTrail :=  fcTailCursorLag( 0 ,0 )	
 				fmt.Printf("%14v",lagTrail)		
 
 				s1, s2, err := getColSizes(false)
@@ -872,9 +812,14 @@ func writeLoadReadInfo() {
 				arrayReadTotal[k] += int64(v)
 			}
 			sum *= readBatchSize
+			/*
+			if sum > 0 {
+				fmt.Printf("r%v ",sum)			
+			}
+			*/		
 			fmt.Printf("%10v",sum)			
 			csvRecord["K Reads per Sec"] = sum / 1000
-			arrayReadNew := make( []int64, len(arrayRead) )
+			arrayReadNew := make( []int64, READ_THREADS )
 			chr <- arrayReadNew
 	
 		} else {
@@ -883,17 +828,22 @@ func writeLoadReadInfo() {
 
 
 
-		ARR_LOAD_CUR, ok := (<- chl)
+		arrayLoad, ok := (<- chl)
 		if ok {
 			sum := int64(0)
-			for k,v := range ARR_LOAD_CUR {
+			for k,v := range arrayLoad {
 				sum += int64(v)
-				ARR_LOAD_TOT[k] += int64(v)
+				arrayLoadTotal[k] += int64(v)
 			}
+			/*
+			if sum > 0 {
+				fmt.Printf("l%v ",sum)			
+			}
+			*/
 			fmt.Printf("%10v",sum)			
 			csvRecord["Inserts per Sec * 10"] = sum / 10
-			arrLoadCurNew := make( []int64, len(ARR_LOAD_CUR) )
-			chl <- arrLoadCurNew
+			arrayLoadNew := make( []int64, MAX_CONC_LOADERS )
+			chl <- arrayLoadNew
 	
 		} else {
 			log.Fatal("error reading from chl 3")
@@ -967,10 +917,10 @@ func incLoadCounter(i int64, idxThread int32){
 	
 		const chunkSize = 100
 		if (i+1) % chunkSize == 0 {
-			ARR_LOAD_CUR, ok := (<- chl)
+			arrayLoad, ok := (<- chl)
 			if ok {
-				ARR_LOAD_CUR[idxThread] += chunkSize
-				chl <- ARR_LOAD_CUR
+				arrayLoad[idxThread] += chunkSize
+				chl <- arrayLoad
 			} else {
 				log.Fatal("error reading from chl 2")
 			}
@@ -979,8 +929,11 @@ func incLoadCounter(i int64, idxThread int32){
 }
 
 
+func funcTailCursorLag()  func (x,y int64) (int64,string){
 
-func tailCursorLogInc(newInsertSaveTime,newTimeOplog int64) (x,y int64) {
+	
+
+	return func (newInsertSaveTime int64,  newTimeOplog int64)(lastLag int64,lagTrail string){
 	
 		if  newInsertSaveTime > 1 {
 		  atomic.StoreInt64( &timeLastSaveOperation, newInsertSaveTime, )
@@ -992,54 +945,47 @@ func tailCursorLogInc(newInsertSaveTime,newTimeOplog int64) (x,y int64) {
 	
 	  effInsertSaveTime :=  atomic.LoadInt64(&timeLastSaveOperation)
 	  effTimeOplog	    :=  atomic.LoadInt64(&timeLastOplogOperation)
-	  
-	  return effInsertSaveTime,effTimeOplog
 
-}
-
-
-func tailCursorLagReport()(lastLag int64,lagTrail string){
-
-	effInsertSaveTime, effTimeOplog :=  tailCursorLogInc(0,0)
-
-	if lv[0] != effTimeOplog{
-		var lvTmp []int64 = make( []int64, lagSize )
-		for k,_ := range lv {
-			if k == 0 {
-				continue
-			}
-			lvTmp[k] = lv[k-1]
-		}
-		lv =lvTmp
-		lv[0] = effTimeOplog
-	}
-
-	var comparisonBase int64 
-	//comparisonBase = tStart.Unix()
-	//comparisonBase = time.Now().Unix()
-	comparisonBase = effInsertSaveTime
-
-	tmp := int64(0)
-	for k,v := range lv {
-			if v > 1 {
-				tmp = comparisonBase - v
-			} else {
-				tmp = lv[k]
-			}
-			lagTrail = fmt.Sprint( lagTrail," ", tmp )
-
-			if k == 0 {
-				lastLag = tmp	
-			}
-
-	}
-
-	
-	return lastLag, lagTrail
 		
+		if lv[0] != effTimeOplog{
+			var lvTmp []int64 = make( []int64, lagSize )
+			for k,_ := range lv {
+				if k == 0 {
+					continue
+				}
+				lvTmp[k] = lv[k-1]
+			}
+			lv =lvTmp
+			lv[0] = effTimeOplog
+		}
+	
+		var comparisonBase int64 
+		//comparisonBase = tStart.Unix()
+		//comparisonBase = time.Now().Unix()
+		comparisonBase = effInsertSaveTime
+
+		tmp := int64(0)
+		for k,v := range lv {
+				if v > 1 {
+					tmp = comparisonBase - v
+				} else {
+					tmp = lv[k]
+				}
+				lagTrail = fmt.Sprint( lagTrail," ", tmp )
+
+				if k == 0 {
+					lastLag = tmp	
+				}
+
+		}
+	
+		
+		return lastLag, lagTrail
+		
+	}
+
+
 }
-	
-	
 
 
 func finalReport() (x int64, y int64){
@@ -1048,10 +994,10 @@ func finalReport() (x int64, y int64){
 	var readTotal = int64(0)
 	
 
-	ARR_LOAD_CUR, ok1 := (<- chl)
+	arrayLoad, ok1 := (<- chl)
 	if ok1 {
-		for k,_ := range ARR_LOAD_CUR {
-			v2 := ARR_LOAD_TOT[k]
+		for k,_ := range arrayLoad {
+			v2 := arrayLoadTotal[k]
 			loadTotal += v2
 			log.Printf("thread %v - load ops %v - ", k , v2)
 		}
@@ -1083,7 +1029,8 @@ func x4_________________________(){}
 func loadInsert(idxThread int32 , batchStamp int64){
 	
 	
-	fctfuncRecurseMsg   := funcRecurseMsg( fmt.Sprint("loadInsert",idxThread," "))
+	fcTailCursorLag   := funcTailCursorLag()
+	fctfuncRecurseMsg := funcRecurseMsg( fmt.Sprint("loadInsert",idxThread," "))
 
 	conn := getConn()
 	defer conn.Close()
@@ -1106,11 +1053,11 @@ func loadInsert(idxThread int32 , batchStamp int64){
 		log.Print( fctfuncRecurseMsg() )
 
 		incLoadCounter(i,idxThread)
-		_,_ =  tailCursorLogInc( time.Now().Unix() ,0)	
+		_,_ =  fcTailCursorLag( time.Now().Unix() ,0)	
 		
 	}
 	atomic.AddInt32( &LOADER_COUNTER, -1 )
-	fmt.Print(" -ld_ins",idxThread,"_fin")
+	fmt.Print(" -ld_insrt",idxThread,"_finish")
 	
 }
 
@@ -1438,3 +1385,18 @@ func Reverse(s string) string{
 }
 
 
+func spawnInserts(){
+
+	for {
+		lc := atomic.LoadInt32( &LOADER_COUNTER )
+		if lc > MAX_CONC_LOADERS-1 {
+			time.Sleep( 200 * time.Millisecond )
+			continue
+		}
+
+		atomic.AddInt32( &LOADER_COUNTER, 1, )
+		batchStamp := int64(time.Now().Unix() )<<32  +  int64(lc)*insertsPerThread
+		go loadInsert( lc, batchStamp)
+	}
+
+}
