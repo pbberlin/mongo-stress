@@ -15,9 +15,8 @@
 	line-height: 240%
 '>
 	<a href='#'  onclick='javascript:cmdStart();return false;' accesskey='s' ><u>S</u>tart Load</a><br>
-	<a href='#'  onclick='javascript:cmChartingToggle() ;return false;' accesskey='c' >Start/Stop <u>C</u>harting</u></a><br>
-
-	<br><a href='#'  onclick='javascript:cmdStop() ;return false;' accesskey='p' >Sto<u>p</u> Server App Loading</a><br>
+	<a href='#'  onclick='javascript:cmdStop() ;return false;' accesskey='p' >sto<u>p</u> Server App Loading</a><br>
+	<a href='#'  onclick='javascript:cmChartingStop() ;return false;' accesskey='c' >stop <u>C</u>harting</u></a><br>
 </div>
 
 <div id='navi'  style='display:block; 
@@ -32,7 +31,7 @@
 		function changeThreadNumber(explicitThis, argIncDec, readOrLoad){
 			
 			
-			var inputId = "#inp"+readOrLoad+"Threads"
+			var inputId = "#inpChange"+readOrLoad+"Threads"
 			var ajaxUrl = '/change'+readOrLoad+'Threads/'
 
 			var prevVal = $(inputId).val();
@@ -69,40 +68,36 @@
 		}
 	</script>
 
-
-	Read Threads<br>
-	<form id='frmChangeReadThreads'>
-		<a href='#'  onclick='javascript:changeThreadNumber(this,-1,"Read");return false;' accesskey='' > < </a>
+	Load Threads<br>
+	<form id='frmChangeLoadThreads'>
+		<a href='#'  onclick='javascript:changeThreadNumber(this,-1,"Load");return false;' accesskey='i' ><</a>
 		<input 
 			type='text' 
-			id='inpReadThreads'
-			name='inpReadThreads'
+			id='inpChangeLoadThreads'
+			name='inpChangeLoadThreads'
 			value='2'
 			min=0 max=12 maxlength=2 
 			pattern="[0-9]+"
 			size=2  style='width:20px' autofocus='autofocus' 
-			placeholder='Anzahl Insert Threads'
-			disabled='disabled'
+			placeholder='Anzahl insert Threads'
 		/>
-	<a href='#'  onclick='javascript:changeThreadNumber(this,1,"Read");return false;' accesskey='' > > </a><br>
+	<a href='#'  onclick='javascript:changeThreadNumber(this,1,"Load");return false;' accesskey='j' >></a><br>
 	</form>
 
-
-	<br>Load Threads<br>
-	<form id='frmChangeLoadThreads'>
-		<a href='#'  onclick='javascript:changeThreadNumber(this,-1,"Load");return false;' accesskey='i' > < </a>
+	<br>Read Threads<br>
+	<form id='frmChangeReadThreads'>
+		<a href='#'  onclick='javascript:changeThreadNumber(this,-1,"Read");return false;' accesskey='r' ><</a>
 		<input 
 			type='text' 
-			id='inpLoadThreads'
-			name='inpLoadThreads'
+			id='inpChangeReadThreads'
+			name='inpChangeReadThreads'
 			value='2'
 			min=0 max=12 maxlength=2 
 			pattern="[0-9]+"
 			size=2  style='width:20px' autofocus='autofocus' 
-			placeholder='Anzahl Load Threads'
-			disabled='disabled'
+			placeholder='Anzahl insert Threads'
 		/>
-	<a href='#'  onclick='javascript:changeThreadNumber(this,1,"Load");return false;' accesskey='j' > > </a><br>
+	<a href='#'  onclick='javascript:changeThreadNumber(this,1,"Read");return false;' accesskey='' >></a><br>
 	</form>
 
 
@@ -117,7 +112,6 @@
 '>
 </div>
 <div id='msg-area'  style='display:block; 
-	margin-left:15px;
 	min-width: 200px; height: 600px; 
 	background-color:#def; 
 	overflow:hidden;
@@ -131,11 +125,10 @@
 		var js_dry_run = false;
 
 		var cntrGotPerformanceCur   = 0;
+		var cntrGotPerformanceMax   = 100*100*60;		
 
-		var timer_id_dataload = 0;
-		var timer_id_chartupdate = 0;
-		
-		var pauseCharting = false;
+		var timer_id_1 = 0;
+		var timer_id_chart = 0;
 
 		var jsonMap = {};												// holds current performance data
 		jsonMap["K Reads per Sec"] = 0;
@@ -186,8 +179,6 @@
 			}
 		);
 		
-
-		
 		
 
 		
@@ -203,18 +194,23 @@
 				url: '/stop/someid',
 				cache: false
 			})
-			cmChartingToggle();
+			cmChartingStop();
 		}
 
-		function cmChartingToggle(){ 
-			//clearInterval(timer_id_chartupdate);
-			pauseCharting = ! pauseCharting;
+		function cmChartingStop(){ 
+			clearInterval(timer_id_chart);			
+			cntrGotPerformanceMax = 2;
+			//alert('Ajax requests stopped: ' + cntrGotPerformanceMax );
 		}
 
 
 		function getPerformanceData(){ 
-			if( pauseCharting ) return;
 			cntrGotPerformanceCur++;
+			if( cntrGotPerformanceCur >= cntrGotPerformanceMax ){
+				cntrGotPerformanceCur = 'finished'
+				clearInterval(timer_id_1);
+				return;
+			} 
 			if( js_dry_run ) return;
 			$.ajax({
 				url: '/data/?hostname=r900&',
@@ -232,28 +228,10 @@
 			});
 		}
 
-		function getThreadCounts(){
-			$.ajax({
-				url: '/getThreadCounts/bla',
-				cache: false
-			}).done(function( argJsonMap ) {
-				var keyVal = ""
-				$.each( argJsonMap, function(key, val) { 
-						keyVal = key + ":" + val + "; " + keyVal ;  
-						$('#'+key).val(val);
-				});
-				var prepend = '<br>init' ;
-				$('#msg-area').prepend( '<br>' + keyVal);
-	
-			});
-		}
-
 		jQuery(document).ready(function($) {
 
-
-			getThreadCounts();
 			getPerformanceData();
-			timer_id_dataload   = setInterval('getPerformanceData()',1000);
+			timer_id_1   = setInterval('getPerformanceData()',1000);
 
 
 		});
@@ -285,8 +263,7 @@
 					events: {
 						load: function(){
 							var arrSeries = this.series;
-							timer_id_chartupdate = setInterval( function(){
-								if( pauseCharting ) return;
+							timer_id_chart = setInterval( function(){
 								var x  = (new Date()).getTime(); // current time
 								for( var j=0; j < arrSeries.length; j++ ){
 									var lpName = arrSeries[j]["name"];

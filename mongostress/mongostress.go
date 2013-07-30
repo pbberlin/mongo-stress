@@ -24,7 +24,6 @@ It is also a Mongo Load Tester
 It Tests Inserts, Reads, 
 
 
-todo: array lv[] needs to be synchronized
 
 
 */
@@ -50,40 +49,40 @@ import (
 )
 
 var   countNoNextValue  int = 0
-const noNextValueMax	int = 2 
+const noNextValueMax	  int = 122		// if the tailing cursor is exhausted this many times, we QUIT the app
 
 const secondsDefer = 4							// upon cursor not found error - amount of sleep  - 
 const secondsDeferTailCursor = 1		// after sleep - set back additional x seconds
 
 
 var LOADER_COUNTER  = int32(0)
-var LOADERS_CONC_MAX=	int32(2)
+var LOADERS_CONC_MAX=	int32(0)
 var ARR_LOAD_TOT = make( []int64 ,LOADERS_CONC_MAX )
 var ARR_LOAD_CUR = make( []int64, LOADERS_CONC_MAX )
-var chl chan []int64 = make(chan []int64 ,1)      // channel load
+var chl chan []int64 = make(chan []int64 ,1)      // sync channel load
 
 
 
-var READ_THREADS	int = 2
+var READER_COUNTER	  = int32(0)
+var READERS_CONC_MAX	= int32(1)
+var ARR_READ_TOT = make([]int64 ,READERS_CONC_MAX)
+var ARR_READ_CUR = make([]int64 ,READERS_CONC_MAX)
+var chr chan []int64 = make(chan []int64 ,1)      // sync channel read
 
-const insertsPerThread  = int64(400)  // if oplog is not big enough, causes "cursor not found"
 
 
-const outputLevel = 0
-
+const offers = "offers.test"
 const changelogDb  string = "offer-db"
 const changelogCol string = "oplog.subscription"
 const counterChangeLogCol string = "oplog.subscription.counter"
-var   changelogPath = fmt.Sprint( changelogDb , "." , changelogCol )
-const offers = "offers.test"
+var   changelogFullPath = fmt.Sprint( changelogDb , "." , changelogCol )
+
 var   mongoSecsEarlier mongo.Timestamp = mongo.Timestamp(5898548092499667758)	// limit timestamp
 
+const outputLevel = 0
+
 const readBatchSize= 100
-
-var chr chan []int64 = make(chan []int64 ,1)      // channel read
-var arrayReadTotal = make([]int64 ,READ_THREADS)
-
-
+const insertsPerThread  = int64(400)  // if oplog is not big enough, causes "cursor not found"
 
 
 var cht chan int64   = make(chan   int64 ,1)	    // channel cursor tail
@@ -92,24 +91,26 @@ var tailTotal = int64(0)
 var cq  chan int	 = make(chan   int   )		      // channel quit
 
 
-var	tsStart int64	     = time.Now().Unix()
 var	tStart  time.Time  = time.Now()
+var	tsStart int64	     = tStart.Unix()
 
 
 var timeLastOplogOperation  int64 = time.Now().Unix()
 var timeLastSaveOperation   int64 = time.Now().Unix()
-const lagSize = 4
-var lv []int64 = make( []int64, lagSize )
+const sizeLagReport = 4
+var lv []int64 = make( []int64, sizeLagReport )
+
 
 var freeMem int64 = 0
+
 
 var csvRecord map[string]int64 = make(map[string]int64)
 var singleInstanceRunning bool = false
 
+
 var templates = template.Must( template.ParseFiles("main_header.html", "main_body.html",
  "main_body_chart.html",
  "main_footer.html") )
-
 var httpParamValidator = regexp.MustCompile("^[a-zA-Z0-9/]+$")
 
 
@@ -129,6 +130,10 @@ func main(){
   http.HandleFunc("/stop/" , stopHandler)
   http.HandleFunc("/tpl/"  , subClassOfHandlerFunc(tplHandler) )
   http.HandleFunc("/changeLoadThreads/" , subClassOfHandlerFunc(changeLoadThreads))
+  http.HandleFunc("/changeReadThreads/" , subClassOfHandlerFunc(changeReadThreads))
+  http.HandleFunc("/getThreadCounts/" , subClassOfHandlerFunc(getThreadCounts))
+  
+  
   
   //panic(http.ListenAndServe(":8080", http.FileServer(http.Dir("/home/peter.buchmann/ws_go/src/github.com/pbberlin/g1/mongostress"))))
   http.ListenAndServe(":8080", nil)
@@ -172,7 +177,11 @@ func elseHandler(w http.ResponseWriter, r *http.Request) {
 		"tpl":   "tpl" ,
 		"data":  "data" ,
 		"changeLoadThreads": "changeLoadThreads",
+		"changeReadThreads": "changeReadThreads",
+		"getThreadCounts": "getThreadCounts",
+		
 		"command-without-handler":  "bla" ,
+		
 	}
 
 	msgCommands := ""
@@ -191,7 +200,6 @@ func elseHandler(w http.ResponseWriter, r *http.Request) {
   } else {
   	fmt.Fprintf(w, "valid command \"%v\" \n- but no handler available\n",path1)	
   }
-  
 	http.Redirect(w, r, "/tpl/", http.StatusFound)
   
 }
@@ -208,43 +216,106 @@ func stopHandler(w http.ResponseWriter, r *http.Request) {
 
 func changeLoadThreads(w http.ResponseWriter, r *http.Request, dummy string) {
 
-		const lenPath = len("/changeLoadThreads/")
-	  params := r.URL.Path[lenPath:]
+
+	const lenPath = len("/changeLoadThreads/")
+  params := r.URL.Path[lenPath:]
 	
-  	
-  	newLoadersConcMax,err := strconv.ParseInt( params,10,32 )
-  	if err != nil {
-	  	p2( w, "could not parse '%v'- no change<br>\n", params)
-  	} else {
-	  	p2( w, "changeLoadThreads switched from %v to %v \n", LOADERS_CONC_MAX, params)
-  		if( int32(newLoadersConcMax) > LOADERS_CONC_MAX ){
-  			ARR_LOAD_CUR, ok := (<- chl)
-		  	p2( w, "cur len %v \n", len(ARR_LOAD_CUR) )
-				if ok {
-					ARR_LOAD_TOT = make( []int64 , newLoadersConcMax )
-					ARR_LOAD_CUR = make( []int64 , newLoadersConcMax )
-				} else {
-					log.Fatal("error reading from chl 4")
-				}
-		  	p2( w, "new len %v \n", len(ARR_LOAD_CUR) )
-				LOADERS_CONC_MAX=	int32(newLoadersConcMax)
-				chl <- ARR_LOAD_CUR				
-				
-  		} else {
-  			ARR_LOAD_CUR, _ := (<- chl)
-				LOADERS_CONC_MAX=	int32(newLoadersConcMax)
-				chl <- ARR_LOAD_CUR				
-  		}
+	newLoadersConcMax,err := strconv.ParseInt( params,10,32 )
+	if err != nil {
+  	p2( w, "could not parse '%v'- no change<br>\n", params)
+	} else {
 
+  	p2( w, "changeLoadThreads switched from %v to %v \n", LOADERS_CONC_MAX, newLoadersConcMax)
 
+		// loading not started yet
+		if !singleInstanceRunning {
+	  	p2( w, "<br>changing load threads while not running \n" )
+			LOADERS_CONC_MAX=	int32(newLoadersConcMax)
+			ARR_LOAD_TOT = make( []int64 , newLoadersConcMax )
+			ARR_LOAD_CUR = make( []int64 , newLoadersConcMax )
+			return
+		}
 
-  	}
+		// loading already started - carefully intervene by blocking the channel
+		if( int32(newLoadersConcMax) > LOADERS_CONC_MAX ){
+			ARR_LOAD_CUR, ok := (<- chl)
+	  	//p2( w, "cur len %v \n", len(ARR_LOAD_CUR) )
+			if ok {
+				ARR_LOAD_TOT = make( []int64 , newLoadersConcMax )
+				tmp := make( []int64 , newLoadersConcMax )
+				copy(tmp,ARR_LOAD_CUR)
+				ARR_LOAD_CUR = tmp
+			} else {
+				log.Fatal("error reading from chl 4")
+			}
+	  	//p2( w, "new len %v \n", len(ARR_LOAD_CUR) )
+			LOADERS_CONC_MAX=	int32(newLoadersConcMax)
+			chl <- ARR_LOAD_CUR				
+			
+		} else {
+			ARR_LOAD_CUR, _ := (<- chl)
+			LOADERS_CONC_MAX=	int32(newLoadersConcMax)
+			chl <- ARR_LOAD_CUR				
+		}
+
+	}
   	
 }
 
 
+func changeReadThreads(w http.ResponseWriter, r *http.Request, dummy string) {
+
+
+	const lenPath = len("/changeReadThreads/")
+  params := r.URL.Path[lenPath:]
+	
+	newReadersConcMax,err := strconv.ParseInt( params,10,32 )
+	if err != nil {
+  	p2( w, "could not parse '%v'- no change<br>\n", params)
+	} else {
+
+  	p2( w, "changeReadThreads switched from %v to %v \n", READERS_CONC_MAX, newReadersConcMax)
+
+		// reading not started yet
+		if !singleInstanceRunning {
+	  	p2( w, "<br>changing read threads while not running \n" )
+			READERS_CONC_MAX=	int32(newReadersConcMax)
+			ARR_READ_TOT = make( []int64 , newReadersConcMax )
+			ARR_READ_CUR = make( []int64 , newReadersConcMax )
+			return
+		}
+
+		// reading already started - carefully intervene by blocking the channel
+		if( int32(newReadersConcMax) > READERS_CONC_MAX ){
+			ARR_READ_CUR, ok := (<- chr)
+	  	//p2( w, "cur len %v \n", len(ARR_READ_CUR) )
+			if ok {
+				ARR_READ_TOT = make( []int64 , newReadersConcMax )
+				tmp := make( []int64 , newReadersConcMax )
+				copy(tmp,ARR_READ_CUR)
+				ARR_READ_CUR = tmp
+			} else {
+				log.Fatal("error reading from chr 4")
+			}
+	  	//p2( w, "new len %v \n", len(ARR_READ_CUR) )
+			READERS_CONC_MAX=	int32(newReadersConcMax)
+			chr <- ARR_READ_CUR				
+			
+		} else {
+			ARR_READ_CUR, _ := (<- chr)
+			READERS_CONC_MAX=	int32(newReadersConcMax)
+			chr <- ARR_READ_CUR				
+		}
+
+	}
+  	
+}
+
+
+
 /* sending current csv column as JSON to client */
 func dataHandler(w http.ResponseWriter, r *http.Request) {
+
 
  	arrByte,err := json.Marshal( csvRecord ) 
  	if err != nil {
@@ -257,14 +328,31 @@ func dataHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 
+func getThreadCounts(w http.ResponseWriter, r *http.Request, params string) {
+
+	var mapCounts map[string]int32 = make(map[string]int32)
+	mapCounts["inpLoadThreads"] = LOADERS_CONC_MAX
+	mapCounts["inpReadThreads"] = READERS_CONC_MAX
+ 	arrByte,err := json.Marshal( mapCounts ) 
+ 	if err != nil {
+		p2(w,"Marshal Map to Json - %v",err) 		
+ 	} else {
+  	w.Header().Set("Content-type:", "application/json")
+  	w.Write(arrByte)
+ 	}
+
+ 	
+}
+
+
 func tplHandler(w http.ResponseWriter, r *http.Request, params string) {
 	
 	c := map[string]string{
-		"Title": fmt.Sprint("test title ...",params ),
+		"Title": fmt.Sprint("Mongo Load",""),
 	  "Body" :"body msg test",
 	}
 	renderTemplatePrecompile( w ,"main_header", c )	
-	renderTemplatePrecompile( w ,"main_body", c )	
+	//renderTemplatePrecompile( w ,"main_body", c )	
 	renderTemplateNewCompile( w ,"main_body_chart", c )	
 	renderTemplatePrecompile( w ,"main_footer", c )	
 
@@ -312,19 +400,15 @@ func startHandler(w http.ResponseWriter, r *http.Request, params string) {
 
 	go spawnInserts()
 
+	go spawnReads()
 
-	loadRead :=  funcLoadRead()
-	for i:= 0; i< READ_THREADS; i++ {
-		go loadRead( i, false)
-	}
 
 
 
 	// no throwing the "syncing" balls onto the field:
 	chl <- ARR_LOAD_CUR
 
-	arrayRead := make( []int64, READ_THREADS )
-	chr <- arrayRead
+	chr <- ARR_READ_TOT
 
 	cht <- int64(0)
 
@@ -378,6 +462,27 @@ func spawnInserts(){
 
 }
 
+
+func spawnReads(){
+
+	loadRead :=  funcLoadRead()
+
+	monotonicInc := int32(0)
+	for {
+		
+		lc := atomic.LoadInt32( &READER_COUNTER )
+		if lc > READERS_CONC_MAX-1 {
+			time.Sleep( 500 * time.Millisecond )
+			continue
+		}
+		
+
+		atomic.AddInt32( &READER_COUNTER, 1, )
+		go loadRead( lc, false )
+		monotonicInc++
+	}
+
+}
 
 
 
@@ -433,7 +538,7 @@ func initDestinationCollections(conn mongo.Conn) (mongo.Collection, mongo.Collec
 
 	n, _ := colChangeLog.Find(nil).Count()
 	if n>0   {
-		log.Println("capped oplog ",changelogPath,"already exists. Entries: ", n)
+		log.Println("capped oplog ",changelogFullPath,"already exists. Entries: ", n)
 	} else {
 		dbChangeLog  := mongo.Database{conn, changelogDb, mongo.DefaultLastErrorCmd}	// get a database object
 		errCreate := dbChangeLog.Run(
@@ -447,7 +552,7 @@ func initDestinationCollections(conn mongo.Conn) (mongo.Collection, mongo.Collec
 		if errCreate != nil {
 			log.Fatal(errCreate)
 		} else {
-			log.Println("capped oplog ",changelogPath,"created")
+			log.Println("capped oplog ",changelogFullPath,"created")
 		}
 	}
 	errCounter := colChangelogCounter.Upsert( mongo.M{"counter": mongo.M{"$exists": true}, } , mongo.M{"counter": 1}  ,)
@@ -626,9 +731,9 @@ func iterateTailCursor( oplogsubscription mongo.Collection , oplogSubscriptionCo
 			var innerMap mongo.M = nil
 
 			ns := m["ns"].(string) 
-			//log.Printf("%+v %T -  vs. %v\n",ns, ns, changelogPath)
+			//log.Printf("%+v %T -  vs. %v\n",ns, ns, changelogFullPath)
 
-			if   ! strings.HasPrefix( ns ,changelogPath)  {
+			if   ! strings.HasPrefix( ns ,changelogFullPath)  {
 
 				var ok bool = true	
 				mongoSecsEarlier,ok = m["ts"].(mongo.Timestamp)
@@ -864,18 +969,18 @@ func startTimerLog(){
 
 func writeLoadReadInfo() {
 	
-		arrayRead, ok := (<- chr)
+		ARR_READ_CUR, ok := (<- chr)
 		if ok {
 			sum := int64(0)
-			for k,v := range arrayRead {
+			for k,v := range ARR_READ_CUR {
 				sum += int64(v)
-				arrayReadTotal[k] += int64(v)
+				ARR_READ_TOT[k] += int64(v)
 			}
 			sum *= readBatchSize
 			fmt.Printf("%10v",sum)			
 			csvRecord["K Reads per Sec"] = sum / 1000
-			arrayReadNew := make( []int64, len(arrayRead) )
-			chr <- arrayReadNew
+			arrReadCurNew := make( []int64, len(ARR_READ_CUR) )
+			chr <- arrReadCurNew
 	
 		} else {
 			log.Fatal("error reading from chr 3")
@@ -948,14 +1053,14 @@ func incTailCounter(){
 
 
 
-func incReadCounter(i int64, idxThread int){
+func incReadCounter(i int64, idxThread int32){
 
 		const chunkSize = 100
 		if (i+1) % chunkSize == 0 {
-			arrayRead, ok := (<- chr)
+			ARR_READ_CUR, ok := (<- chr)
 			if ok {
-				arrayRead[idxThread] += chunkSize
-				chr <- arrayRead
+				ARR_READ_CUR[idxThread] += chunkSize
+				chr <- ARR_READ_CUR
 			} else {
 				log.Fatal("error reading from chr 2")
 			}
@@ -1003,7 +1108,7 @@ func tailCursorLagReport()(lastLag int64,lagTrail string){
 	effInsertSaveTime, effTimeOplog :=  tailCursorLogInc(0,0)
 
 	if lv[0] != effTimeOplog{
-		var lvTmp []int64 = make( []int64, lagSize )
+		var lvTmp []int64 = make( []int64, sizeLagReport )
 		for k,_ := range lv {
 			if k == 0 {
 				continue
@@ -1060,10 +1165,10 @@ func finalReport() (x int64, y int64){
 	}
 
 
-	arrayRead, ok2 := (<- chr)
+	ARR_READ_CUR, ok2 := (<- chr)
 	if ok2 {
-		for k,_ := range arrayRead {
-			v2 := arrayReadTotal[k]
+		for k,_ := range ARR_READ_CUR {
+			v2 := ARR_READ_TOT[k]
 			v2 *= readBatchSize
 			readTotal += v2
 			log.Printf("thread %v - read ops %v - ", k , v2)
@@ -1117,7 +1222,7 @@ func loadInsert(idxThread int32 , batchStamp int64){
 
 
 
-func funcLoadRead()  func(idxThread int, doUpdates bool) {
+func funcLoadRead()  func(idxThread int32, doUpdates bool) {
 
 	//newOid := mongo.NewObjectId()
 	//minOid := mongo.MinObjectIdForTime( tStart.Add(-200 * time.Millisecond))
@@ -1142,7 +1247,7 @@ func funcLoadRead()  func(idxThread int, doUpdates bool) {
 
 
 
-	return func(idxThread int, doUpdates bool ) {
+	return func(idxThread int32, doUpdates bool ) {
 
 		doUpdates = ! doUpdates 
 
@@ -1164,8 +1269,9 @@ func funcLoadRead()  func(idxThread int, doUpdates bool) {
 		for  {
 
 			i++
-			if i > (10 * 1000 * 1000) {
-				log.Println("more than 10.000 iterations. Break.")		
+			imax := int64(10 * 1000)
+			if i > imax {
+				log.Println( fmt.Sprint(" more than ",imax," iterations. Tread over.") )		
 				break	
 			}
 			log.Print( fctfuncRecurseMsg() )
@@ -1199,6 +1305,7 @@ func funcLoadRead()  func(idxThread int, doUpdates bool) {
 
 			
 		}
+		atomic.AddInt32( &READER_COUNTER, -1 )	
 		fmt.Print(" -ld_rd_",idxThread,"_finish")
 
 
@@ -1213,7 +1320,7 @@ func funcLoadRead()  func(idxThread int, doUpdates bool) {
 	partitioning data, so that reads can start at different partitions
 
 */
-func funcPartitionStart() func(threadIdx int) (x,y mongo.ObjectId){
+func funcPartitionStart() func(threadIdx int32) (x,y mongo.ObjectId){
 
 		conn := getConn()
 		defer conn.Close()
@@ -1270,9 +1377,9 @@ func funcPartitionStart() func(threadIdx int) (x,y mongo.ObjectId){
 		diffTime := ctMax.Sub(ctMin)
 
 
-		return func(threadIdx int)(minOid,minOidThreadPartition mongo.ObjectId) {
+		return func(threadIdx int32)(minOid,minOidThreadPartition mongo.ObjectId) {
 
-			partitionTimeDiff := time.Duration(threadIdx)*diffTime / time.Duration(READ_THREADS)
+			partitionTimeDiff := time.Duration(threadIdx)*diffTime / time.Duration(READERS_CONC_MAX)
 			//fmt.Println("diff",diffTime, partitionTimeDiff)				
 			timeMinThread := ctMin.Add( partitionTimeDiff )
 			minOidThread  := mongo.MinObjectIdForTime( timeMinThread )
