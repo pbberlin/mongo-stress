@@ -2,19 +2,10 @@ package main
 
 /*
 
-function strRepeat ( str, num ){
-	return new Array( num + 1 ).join( str);
-}
-
-alert( "string to repeat\n".repeat( 4 ) );
-
-*/
-
-//   wget localhost:8080/start --retry-connrefused
+cd /home/peter.buchmann/ws_go/src/github.com/pbberlin/g1/mongostress
+export GOPATH="/home/peter.buchmann/ws_go/"
 
 
-
-/*
 This is a go implementation of a tailable cursor against the oplog
 as describe at the bottom of this document: 
 	http://docs.mongodb.org/manual/tutorial/create-tailable-cursor/
@@ -88,11 +79,15 @@ const offers = "offers.test"
 const changelogCol string = "oplog.subscription"
 const counterChangeLogCol string = "oplog.subscription.counter"
 
+const shardErr = "can't use 'local' database through mongos"
+var oplogAccessible bool = true
+
 var   changelogFullPath string 
 
 var   mongoSecsEarlier mongo.Timestamp = mongo.Timestamp(5898548092499667758)	// limit timestamp
 
 const outputLevel = 0
+const insertCountIntoCollection bool = false
 
 const readBatchSize  = 100
 const updateBatchSize= 100
@@ -129,15 +124,13 @@ var httpParamValidator = regexp.MustCompile("^[a-zA-Z0-9/]+$")
 
 
 type Config struct {
-        Section struct {
-                Name string
-                Flag bool
-        }
         Main struct {
                 ConnectionString string
                 DatabaseName string
                 DbUsername string
                 DbPassword string
+                DbAdminUsername string
+                DbAdminPassword string
         }
 }
 var CFG Config
@@ -176,10 +169,17 @@ func main(){
   http.HandleFunc("/reloadCfg/" , subClassOfHandlerFunc(reloadCfg))
   
   
+  portStart := 8080
   //panic(http.ListenAndServe(":8080", http.FileServer(http.Dir("/home/peter.buchmann/ws_go/src/github.com/pbberlin/g1/mongostress"))))
-  errL := http.ListenAndServe(":8080", nil)
-  if errL != nil {
-  	fmt.Println("\nhttp server: \n  ", errL, "\n")  	
+  for {
+  	fmt.Println("  about to start listening at port: ", portStart)  	
+	  errL := http.ListenAndServe( fmt.Sprint(":", portStart), nil)
+	  if errL != nil {
+	  	fmt.Println("       http server error ", errL)  	
+	  } else {
+	  	break	
+	  }
+	  portStart++
   }
 
 
@@ -460,7 +460,7 @@ func reloadCfg(w http.ResponseWriter, r *http.Request, params string) {
 func tplHandler(w http.ResponseWriter, r *http.Request, params string) {
 	
 	c := map[string]string{
-		"Title": fmt.Sprint("Mongo Load",""),
+		"Title": fmt.Sprint("Mongo Load"," ",CFG.Main.ConnectionString, " - ", CFG.Main.DatabaseName ),
 	  "Body" :"body msg test",
 	}
 	renderTemplatePrecompile( w ,"main_header", c )	
@@ -596,7 +596,6 @@ func spawnReads(){
 
 		atomic.AddInt32( &READER_COUNTER, 1, )
 		go loadRead( lc )
-<<<<<<< HEAD
 		monotonicInc++
 	}
 
@@ -619,8 +618,6 @@ func spawnUpdates(){
 
 		atomic.AddInt32( &UPDATER_COUNTER, 1, )
 		go loadUpdate( lc )
-=======
->>>>>>> bb5bde771fb9bd79decc5a8a90bd57f1ce91955d
 		monotonicInc++
 	}
 
@@ -628,31 +625,6 @@ func spawnUpdates(){
 
 
 
-<<<<<<< HEAD
-=======
-func spawnUpdates(){
-
-
-	monotonicInc := int32(0)
-	for {
-		
-		lc := atomic.LoadInt32( &UPDATER_COUNTER )
-		if lc > UPDATERS_CONC_MAX-1 {
-			time.Sleep( 500 * time.Millisecond )
-			continue
-		}
-		
-
-		atomic.AddInt32( &UPDATER_COUNTER, 1, )
-		go loadUpdate( lc )
-		monotonicInc++
-	}
-
-}
-
-
-
->>>>>>> bb5bde771fb9bd79decc5a8a90bd57f1ce91955d
 func x1___mongo_access_stuff__(){}
 
 
@@ -665,7 +637,6 @@ func getConn() mongo.Conn {
 	}
 
 	if len(CFG.Main.DbUsername) > 0 {
-<<<<<<< HEAD
 		dbForAuthApp  := mongo.Database{conn, CFG.Main.DatabaseName, mongo.DefaultLastErrorCmd}	// database object for authentication
 		errAuth1 := dbForAuthApp.Authenticate(CFG.Main.DbUsername, CFG.Main.DbPassword) 
 		if errAuth1 != nil {
@@ -673,22 +644,31 @@ func getConn() mongo.Conn {
 			log.Fatal(errAuth1)
 		}
 
-		dbForAuthLocal  := mongo.Database{conn, "local", mongo.DefaultLastErrorCmd}	// database object for authentication
-		errAuth2 := dbForAuthLocal.Authenticate(CFG.Main.DbUsername, CFG.Main.DbPassword) 
-		if errAuth2 != nil {
-			log.Println("auth2 failed")
-			log.Fatal(errAuth2)
+		if oplogAccessible {
+			dbForAuthLocal  := mongo.Database{conn, "local", mongo.DefaultLastErrorCmd}	
+			errAuth2 := dbForAuthLocal.Authenticate(CFG.Main.DbUsername, CFG.Main.DbPassword) 
+			if errAuth2 != nil {
+				if errAuth2.Error() == shardErr {
+						oplogAccessible = false
+						log.Print(" -no local db on shard")				
+						
+				}
+			} else {
+				log.Println(" -auth for local failed: ", errAuth2 , " trying anyway")
+			}
 		}
 
-=======
-		dbForAuth  := mongo.Database{conn, CFG.Main.DatabaseName, mongo.DefaultLastErrorCmd}	// database object for authentication
-		errAuth := dbForAuth.Authenticate(CFG.Main.DbUsername, CFG.Main.DbPassword) 
-		if errAuth != nil {
-			log.Println("auth failed")
-			log.Fatal(errAuth)
-		}
->>>>>>> bb5bde771fb9bd79decc5a8a90bd57f1ce91955d
 	}
+
+
+	if len(CFG.Main.DbAdminUsername) > 0 {
+			dbForAuthAdmin  := mongo.Database{conn, "admin", mongo.DefaultLastErrorCmd}	
+		errAuth3 := dbForAuthAdmin.Authenticate(CFG.Main.DbAdminUsername, CFG.Main.DbAdminPassword) 
+		if errAuth3 != nil {
+				log.Println(" -auth for admin failed: ", errAuth3 , " trying anyway")
+		}
+	}
+
 
 	return conn
 
@@ -785,10 +765,10 @@ func getColSizes(printDetails bool)(size1,size2 int64, err error){
 
   //err = db.Run(mongo.D{{"dbStats", 1}}, &m)
 
-	db = mongo.Database{conn, "offer-db", mongo.DefaultLastErrorCmd}
-	err = db.Run(mongo.D{{"collStats","offers.test" },{"scale",(1024*1024) }}, &m)
+	db = mongo.Database{conn, CFG.Main.DatabaseName, mongo.DefaultLastErrorCmd}
+	err = db.Run(mongo.D{{"collStats",offers },{"scale",(1024*1024) }}, &m)
 	if err != nil {
-		fmt.Println("collStats for offers.test failed: ", err)
+		fmt.Println(  fmt.Sprint("collStats for ",CFG.Main.DatabaseName,".",offers," failed: "), err)
 	} else {
 		if printDetails {
 			fmt.Println( m["ns"] , " size: ", m["storageSize"], " MB" )			
@@ -803,7 +783,11 @@ func getColSizes(printDetails bool)(size1,size2 int64, err error){
 	db = mongo.Database{conn, "local", mongo.DefaultLastErrorCmd}
 	err = db.Run(mongo.D{{"collStats","oplog.rs" },{"scale",(1024*1024) }}, &m)
 	if err != nil {
-		log.Fatal("oplog-stats failed: ", err)
+		if err.Error() == shardErr {
+			//log.Print(" -no local db on shard - no oplog size")				
+		} else {
+			fmt.Println(  fmt.Sprint("collStats for ", "local.oplog.rs" ," failed: "), err)
+		}	
 	} else {
 		if printDetails {
 			fmt.Println( m["ns"] , " size: ", m["storageSize"], " MB" )			
@@ -898,19 +882,24 @@ func iterateTailCursor( oplogsubscription mongo.Collection , oplogSubscriptionCo
 	
 	for {
 		
-		doBreak, hasNext := checkTailCursor(c)
+		doBreak, hasNext, dbLocalAvailable := checkTailCursor(c)
+		
+		if !  dbLocalAvailable {
+			fmt.Println("no tail cursor on shard system")	
+			return
+		}
 
 
 		if doBreak {
 
-			fmt.Print("going to sleep ",secondsDefer, " seconds")
+			fmt.Print("going to sleep ",secondsDefer, " secs.")
 			time.Sleep( secondsDefer * time.Second )
 			
 			if countNoNextValue < noNextValueMax {
 				c = recoverTailCursor()
-				doBreak, _ := checkTailCursor(c)
+				doBreak, _, _ := checkTailCursor(c)
 				if doBreak {
-					log.Println("second failure")
+					log.Println("second failure of tail cursor")
 					break
 				}
 			} else {
@@ -980,10 +969,10 @@ func iterateTailCursor( oplogsubscription mongo.Collection , oplogSubscriptionCo
 				printMap(m,true,"   ")
 
 
-				incTailCounter()
-				
-				//errCounter := oplogSubscriptionCounter.Update( mongo.M{"counter": mongo.M{"$exists": true}, } , mongo.M{"$inc"   : mongo.M{"counter": 1}, "$set" : mongo.M{"changed3":2} },)
-				  errCounter := oplogSubscriptionCounter.Update( mongo.M{"counter": mongo.M{"$exists": true}, } , mongo.M{"$inc"   : mongo.M{"counter": 1} },)
+				var errCounter error = nil
+				if insertCountIntoCollection {
+					errCounter = oplogSubscriptionCounter.Update( mongo.M{"counter": mongo.M{"$exists": true}, } , mongo.M{"$inc"   : mongo.M{"counter": 1} },)					
+				}
 				if errCounter != nil {
 					log.Fatal("lf12 ",errCounter)
 				}
@@ -992,6 +981,9 @@ func iterateTailCursor( oplogsubscription mongo.Collection , oplogSubscriptionCo
 			} else {
 				fmt.Print( fctfuncRecurseMsg() )
 			}
+
+			incTailCounter()
+
 			if innerMap != nil { 
 				printMap(innerMap,true,"	  inner map: ") 
 			}
@@ -1038,38 +1030,47 @@ func recoverTailCursor() mongo.Cursor {
 	therefore, currently upon "dead" - we sleep and retry
 
 */
-func checkTailCursor( c mongo.Cursor  ) ( bool,bool ){
+func checkTailCursor( c mongo.Cursor  ) ( doBreak, hasNext, dbLocalAvailable  bool ){
 
-	alive   :=  c.GetId()
+	alive   :=   (c.GetId() > 0)
 
-	hasNext := 	c.HasNext()
-
-	if alive < 1 || hasNext == false {
-
-		if hasNext == false  {
-			log.Print( " has next returned false - going to sleep")
-		}
-
-		if alive < 1  {
-			log.Print( fmt.Sprintf( " dead cursor id is %v", alive) )
-		}
-
-		log.Print( fmt.Sprintf( " await is over - no next value no. %v of %v", countNoNextValue, noNextValueMax) )
-
-		countNoNextValue++
-		if countNoNextValue > noNextValueMax {
-			return true, false
-		}
-
-	}
+	hasNext = 	c.HasNext()
+	
+	dbLocalAvailable = true
 
 
 	if err := c.Err(); err != nil {
-		log.Println(   fmt.Sprint( "mongo permanent cursor error: ", err,"\n") )
-		return true, hasNext
+		if err.Error() == shardErr {
+			return true, hasNext, false
+		} else {
+			log.Println(   fmt.Sprint( "mongo permanent cursor error: ", err,"\n") )
+			return true, hasNext ,dbLocalAvailable
+		}
 	}
 
-	return false, hasNext
+
+	if alive == false || hasNext == false {
+
+
+		if alive == false  {
+			log.Print( fmt.Sprintf( " cursor is dead (%v).", c.GetId()) )
+		}
+
+		if hasNext == false  {
+			log.Print( " hasNext() is false - await is over.")
+		}
+
+		log.Print( fmt.Sprintf( " dead or exhausted %v (max %v).", countNoNextValue, noNextValueMax) )
+
+		countNoNextValue++
+		if countNoNextValue > noNextValueMax {
+			return true , hasNext, dbLocalAvailable
+		}
+
+	}
+
+	return false, hasNext, dbLocalAvailable			
+
 
 }
 
@@ -1143,7 +1144,11 @@ func startTimerLog(){
 
 				s1, s2, err := getColSizes(false)
 				if err != nil {
-					fmt.Printf( "offers: %v  oplog %v \n", s1, s2)	
+					if err.Error() == shardErr {
+						//log.Print(" -no local db on shard - no oplog size")				
+					} else {
+						fmt.Printf( "offers size: %v  oplog %v  - error: %v\n", s1, s2, err)	
+					}				
 				}
 				fmt.Printf("%10v",s1)			
 
@@ -1375,6 +1380,10 @@ func tailCursorLagReport()(lastLag int64,lagTrail string){
 
 	}
 
+
+	if ! oplogAccessible {
+			lastLag = -1
+	}
 	
 	return lastLag, lagTrail
 		
@@ -1455,8 +1464,9 @@ func loadInsert(idxThread int32 , batchStamp int64){
 			 "countUpdates"  : 1 ,
 			 "categoryId"    : 15 ,
 			 "title":	   fmt.Sprint("title",i) ,
-			 //"description": strings.Repeat( fmt.Sprint("description",i), 31),
-			 "description": "new Array( 44 ).join( \"description\")",
+			 "description": strings.Repeat( fmt.Sprint("description",i), 31),
+			 // server side javascript - even if possible - locks the entire collection
+			 //"description": "new Array( 44 ).join( \"description\")",					
 		})
 		if err != nil {
 			log.Println(   fmt.Sprint( "mongo loadInsert error: ", err,"\n") )		
@@ -1499,7 +1509,7 @@ func funcLoadRead()  func(idxThread int32) {
 		for  {
 
 			i++
-			imax := int64(10 * 1000)
+			imax := int64(10 * 1000 * 1000 * readBatchSize)		// make sure to read our dataset at least two times
 			if i > imax {
 				//log.Println( fmt.Sprint(" more than ",imax," iterations. Tread over.") )		
 				break	
@@ -1575,7 +1585,7 @@ func loadUpdate(idxThread int32 ) {
 	for  {
 
 		i++
-		imax := int64( 1000 * updateBatchSize  )
+		imax := int64( 10 * 1000 * 1000 * updateBatchSize  )			// make sure to loop our dataset at least two times
 		if i > imax {
 			//log.Println( fmt.Sprint(" more than ",imax," iterations. LoopUpdate over.") )		
 			break	
@@ -1624,29 +1634,9 @@ func loadUpdate(idxThread int32 ) {
 			}
 			
 			log.Print( fctfuncRecurseMsg() )
-<<<<<<< HEAD
 			incUpdateCounter(updateBatchSize*i + j,idxThread)
 			_,_ =  tailCursorLogInc( time.Now().Unix() ,0)
 
-=======
-			incUpdateCounter(i+j,idxThread)
-			_,_ =  tailCursorLogInc( time.Now().Unix() ,0)
-
-
-			minOidNextRead = tmpLoopOid
-
-			//printMap(m, false,"")
-		}
-
-
-		
-
-		if previousMinOidNextRead == minOidNextRead {
-			fmt.Print(" rd4upd_reset_2",idxThread)
-			minOidNextRead = minOid
-			continue
-		}
->>>>>>> bb5bde771fb9bd79decc5a8a90bd57f1ce91955d
 
 			minOidNextRead = tmpLoopOid
 
@@ -1665,12 +1655,6 @@ func loadUpdate(idxThread int32 ) {
 			continue
 		}
 
-		lc := atomic.LoadInt32( &UPDATER_COUNTER )
-		if lc > UPDATERS_CONC_MAX {
-			fmt.Print(" rd4upd_pruned",idxThread)
-			break
-		}
-		
 
 		lc := atomic.LoadInt32( &UPDATER_COUNTER )
 		if lc > UPDATERS_CONC_MAX {
@@ -1734,7 +1718,8 @@ func funcPartitionStart() func(threadIdx int32, forReadOrUpdate bool) (x,y mongo
 		}
 		oidMax,ok := m2["_id"].(mongo.ObjectId)
 		if ! ok {
-			log.Fatal("max did not contain an OID")				
+			log.Print("max did not contain an OID - using a default ")				
+			oidMax = mongo.MinObjectIdForTime( time.Date(2030, time.December, 31, 23, 59, 0, 222, time.Local))
 		}
 
 		/* Now we could either partition by record -count-
@@ -1929,27 +1914,27 @@ func printHelperCommands(){
 	//newOid := mongo.NewObjectId()
 	//minOid := mongo.MinObjectIdForTime( tStart.Add(-200 * time.Millisecond))
 	minOid1999 := mongo.MinObjectIdForTime( time.Date(1999, time.November, 10, 15, 25, 0, 222, time.Local))
-	mgoCmd := fmt.Sprint( "db.getSiblingDB(\"offer-db\").offers.test.find({},{description:0}).min({_id: ObjectId(\"",minOid1999,"\") })" )
+	mgoCmd := fmt.Sprint( "db.getSiblingDB(\"", CFG.Main.DatabaseName , "\").offers.test.find({},{description:0}).min({_id: ObjectId(\"",minOid1999,"\") })" )
 	fmt.Println(mgoCmd)
 
 
-	mgoCmd = fmt.Sprint( "db.getSiblingDB(\"offer-db\").offers.test.find({},{description:0}).sort({\"_id\":-1})" )
+	mgoCmd = fmt.Sprint( "db.getSiblingDB(\"", CFG.Main.DatabaseName , "\").offers.test.find({},{description:0}).sort({\"_id\":-1})" )
 	fmt.Println(mgoCmd)
-	mgoCmd = fmt.Sprint( "db.getSiblingDB(\"offer-db\").offers.test.find({},{description:0}).sort({\"lastUpdated\":-1})" )
+	mgoCmd = fmt.Sprint( "db.getSiblingDB(\"", CFG.Main.DatabaseName , "\").offers.test.find({},{description:0}).sort({\"lastUpdated\":-1})" )
 	fmt.Println(mgoCmd)
 
 
 	sc := 1024*1024
-	mgoCmd = fmt.Sprint( "db.getSiblingDB(\"offer-db\").offers.test.stats(",sc," )" )
+	mgoCmd = fmt.Sprint( "db.getSiblingDB(\"", CFG.Main.DatabaseName , "\").offers.test.stats(",sc," )" )
 	fmt.Println(mgoCmd)
 	
 	fmt.Println("")
 
-	mgoCmd = fmt.Sprint( "db.getSiblingDB(\"offer-db\").offers.test.ensureIndex( { \"lastUpdated\": 1 } )" )
+	mgoCmd = fmt.Sprint( "db.getSiblingDB(\"", CFG.Main.DatabaseName , "\").offers.test.ensureIndex( { \"lastUpdated\": 1 } )" )
 	fmt.Println(mgoCmd)
-	mgoCmd = fmt.Sprint( "db.getSiblingDB(\"offer-db\").offers.test.getIndexes()" )
+	mgoCmd = fmt.Sprint( "db.getSiblingDB(\"", CFG.Main.DatabaseName , "\").offers.test.getIndexes()" )
 	fmt.Println(mgoCmd)
-	mgoCmd = fmt.Sprint( "db.getSiblingDB(\"offer-db\").offers.test.dropIndex(\"lastUpdated_1\")" )
+	mgoCmd = fmt.Sprint( "db.getSiblingDB(\"", CFG.Main.DatabaseName , "\").offers.test.dropIndex(\"lastUpdated_1\")" )
 	fmt.Println(mgoCmd)
 
 
@@ -1957,10 +1942,10 @@ func printHelperCommands(){
 	fmt.Println("")
 
 
-	mgoCmd = fmt.Sprint( "db.getSiblingDB(\"offer-db\").oplog.subscription.find({},{im:0}).sort({\"_id\":-1})" )
+	mgoCmd = fmt.Sprint( "db.getSiblingDB(\"", CFG.Main.DatabaseName , "\").oplog.subscription.find({},{im:0}).sort({\"_id\":-1})" )
 	fmt.Println(mgoCmd)
 
-	mgoCmd = fmt.Sprint( "db.getSiblingDB(\"offer-db\").oplog.subscription.counter.find({},{_id:0,changed3:0})" )
+	mgoCmd = fmt.Sprint( "db.getSiblingDB(\"", CFG.Main.DatabaseName , "\").oplog.subscription.counter.find({},{_id:0,changed3:0})" )
 	fmt.Println(mgoCmd)
 
 

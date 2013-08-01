@@ -19,6 +19,8 @@ rs.initiate(conf) ;
 // add the last rs member as an arbiter
 rs.addArb('localhost:27003') ;
 rs.status() ;
+db.serverStatus()
+
 }" >> start.js
 
 
