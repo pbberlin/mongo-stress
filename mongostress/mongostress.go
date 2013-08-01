@@ -45,8 +45,12 @@ import (
 	"errors"
 	"encoding/json"	
 	"regexp"
-	
+	"code.google.com/p/gcfg"
 )
+
+
+
+
 
 var   countNoNextValue  int = 0
 const noNextValueMax	  int = 122		// if the tailing cursor is exhausted this many times, we QUIT the app
@@ -71,17 +75,27 @@ var chr chan []int64 = make(chan []int64 ,1)      // sync channel read
 
 
 
+var UPDATER_COUNTER	  = int32(0)
+var UPDATERS_CONC_MAX	= int32(1)
+var ARR_UPDATE_TOT = make([]int64 ,UPDATERS_CONC_MAX)
+var ARR_UPDATE_CUR = make([]int64 ,UPDATERS_CONC_MAX)
+var chu chan []int64 = make(chan []int64 ,1)      // sync channel UPDATE
+
+
+
+
 const offers = "offers.test"
-const changelogDb  string = "offer-db"
 const changelogCol string = "oplog.subscription"
 const counterChangeLogCol string = "oplog.subscription.counter"
-var   changelogFullPath = fmt.Sprint( changelogDb , "." , changelogCol )
+
+var   changelogFullPath string 
 
 var   mongoSecsEarlier mongo.Timestamp = mongo.Timestamp(5898548092499667758)	// limit timestamp
 
 const outputLevel = 0
 
-const readBatchSize= 100
+const readBatchSize  = 100
+const updateBatchSize= 100
 const insertsPerThread  = int64(400)  // if oplog is not big enough, causes "cursor not found"
 
 
@@ -114,7 +128,30 @@ var templates = template.Must( template.ParseFiles("main_header.html", "main_bod
 var httpParamValidator = regexp.MustCompile("^[a-zA-Z0-9/]+$")
 
 
+type Config struct {
+        Section struct {
+                Name string
+                Flag bool
+        }
+        Main struct {
+                ConnectionString string
+                DatabaseName string
+                DbUsername string
+                DbPassword string
+        }
+}
+var CFG Config
+
+
+
 func main(){
+
+	errCfg := loadConfig()
+	if errCfg != nil {
+		log.Fatal(errCfg)
+	}
+	changelogFullPath = fmt.Sprint( CFG.Main.DatabaseName , "." , changelogCol )
+	
 
 	freeMemTmp, err := OsFreeMemMB()
 	if err == nil {
@@ -124,6 +161,9 @@ func main(){
 		log.Fatal(err)
 	}
 	
+	
+	printHelperCommands()
+	
 	http.HandleFunc("/"	  , elseHandler)
   http.HandleFunc("/data/" , dataHandler)
   http.HandleFunc("/start/", subClassOfHandlerFunc(startHandler) )
@@ -131,12 +171,16 @@ func main(){
   http.HandleFunc("/tpl/"  , subClassOfHandlerFunc(tplHandler) )
   http.HandleFunc("/changeLoadThreads/" , subClassOfHandlerFunc(changeLoadThreads))
   http.HandleFunc("/changeReadThreads/" , subClassOfHandlerFunc(changeReadThreads))
+  http.HandleFunc("/changeUpdateThreads/" , subClassOfHandlerFunc(changeUpdateThreads))
   http.HandleFunc("/getThreadCounts/" , subClassOfHandlerFunc(getThreadCounts))
-  
+  http.HandleFunc("/reloadCfg/" , subClassOfHandlerFunc(reloadCfg))
   
   
   //panic(http.ListenAndServe(":8080", http.FileServer(http.Dir("/home/peter.buchmann/ws_go/src/github.com/pbberlin/g1/mongostress"))))
-  http.ListenAndServe(":8080", nil)
+  errL := http.ListenAndServe(":8080", nil)
+  if errL != nil {
+  	fmt.Println("\nhttp server: \n  ", errL, "\n")  	
+  }
 
 
 }
@@ -178,7 +222,9 @@ func elseHandler(w http.ResponseWriter, r *http.Request) {
 		"data":  "data" ,
 		"changeLoadThreads": "changeLoadThreads",
 		"changeReadThreads": "changeReadThreads",
+		"changeUpdateThreads": "changeUpdateThreads",
 		"getThreadCounts": "getThreadCounts",
+		"reloadCfg": "reloadCfg",
 		
 		"command-without-handler":  "bla" ,
 		
@@ -209,7 +255,11 @@ func elseHandler(w http.ResponseWriter, r *http.Request) {
 func stopHandler(w http.ResponseWriter, r *http.Request) {
   	p2( w, "received quit signal by browser: %v", 1)
   	Flush1(w)
+
+		log.Println(" sending quit signal: ", 1)
+		cq <- 1
   	time.Sleep( 50 * time.Millisecond )
+  	
   	os.Exit(1)
 }
 
@@ -313,6 +363,55 @@ func changeReadThreads(w http.ResponseWriter, r *http.Request, dummy string) {
 
 
 
+func changeUpdateThreads(w http.ResponseWriter, r *http.Request, dummy string) {
+
+
+	const lenPath = len("/changeUpdateThreads/")
+  params := r.URL.Path[lenPath:]
+	
+	newUpdateersConcMax,err := strconv.ParseInt( params,10,32 )
+	if err != nil {
+  	p2( w, "could not parse '%v'- no change<br>\n", params)
+	} else {
+
+  	p2( w, "changeUpdateThreads switched from %v to %v \n", UPDATERS_CONC_MAX, newUpdateersConcMax)
+
+		// Updateing not started yet
+		if !singleInstanceRunning {
+	  	p2( w, "<br>changing Update Threads while not running \n" )
+			UPDATERS_CONC_MAX=	int32(newUpdateersConcMax)
+			ARR_UPDATE_TOT = make( []int64 , newUpdateersConcMax )
+			ARR_UPDATE_CUR = make( []int64 , newUpdateersConcMax )
+			return
+		}
+
+		// Updateing alUpdatey started - carefully intervene by blocking the channel
+		if( int32(newUpdateersConcMax) > UPDATERS_CONC_MAX ){
+			ARR_UPDATE_CUR, ok := (<- chu)
+	  	//p2( w, "cur len %v \n", len(ARR_UPDATE_CUR) )
+			if ok {
+				ARR_UPDATE_TOT = make( []int64 , newUpdateersConcMax )
+				tmp := make( []int64 , newUpdateersConcMax )
+				copy(tmp,ARR_UPDATE_CUR)
+				ARR_UPDATE_CUR = tmp
+			} else {
+				log.Fatal("error Updateing from chu 4")
+			}
+	  	//p2( w, "new len %v \n", len(ARR_UPDATE_CUR) )
+			UPDATERS_CONC_MAX=	int32(newUpdateersConcMax)
+			chu <- ARR_UPDATE_CUR				
+			
+		} else {
+			ARR_UPDATE_CUR, _ := (<- chu)
+			UPDATERS_CONC_MAX=	int32(newUpdateersConcMax)
+			chu <- ARR_UPDATE_CUR				
+		}
+
+	}
+  	
+}
+
+
 /* sending current csv column as JSON to client */
 func dataHandler(w http.ResponseWriter, r *http.Request) {
 
@@ -333,12 +432,25 @@ func getThreadCounts(w http.ResponseWriter, r *http.Request, params string) {
 	var mapCounts map[string]int32 = make(map[string]int32)
 	mapCounts["inpLoadThreads"] = LOADERS_CONC_MAX
 	mapCounts["inpReadThreads"] = READERS_CONC_MAX
+	mapCounts["inpUpdateThreads"] = UPDATERS_CONC_MAX
  	arrByte,err := json.Marshal( mapCounts ) 
  	if err != nil {
 		p2(w,"Marshal Map to Json - %v",err) 		
  	} else {
   	w.Header().Set("Content-type:", "application/json")
   	w.Write(arrByte)
+ 	}
+
+ 	
+}
+
+func reloadCfg(w http.ResponseWriter, r *http.Request, params string) {
+
+	err := loadConfig()
+ 	if err != nil {
+		p2(w,"cfg reload failed %v",err) 		
+ 	} else {
+		p2(w,"cfg loaded") 		
  	}
 
  	
@@ -361,6 +473,8 @@ func tplHandler(w http.ResponseWriter, r *http.Request, params string) {
 
 func startHandler(w http.ResponseWriter, r *http.Request, params string) {
 
+
+
 	c := map[string]string{
 		"Title":"Doing load",
 	  "Body" :  fmt.Sprintf("starting ... (%v)\n", params),
@@ -373,6 +487,7 @@ func startHandler(w http.ResponseWriter, r *http.Request, params string) {
 		}
 		renderTemplatePrecompile( w ,"main_body"  , c )	
 		renderTemplatePrecompile( w ,"main_footer", c )	
+		fmt.Println("already one instance running")
 		return
 	} else {
 		singleInstanceRunning = true
@@ -391,7 +506,6 @@ func startHandler(w http.ResponseWriter, r *http.Request, params string) {
 	//clearAll(conn)
 
 	startTimerLog()
-
 	colChangeLog, colCounterChangeLog := initDestinationCollections(conn)
 
 	go iterateTailCursor(colChangeLog, colCounterChangeLog)
@@ -402,24 +516,26 @@ func startHandler(w http.ResponseWriter, r *http.Request, params string) {
 
 	go spawnReads()
 
+	go spawnUpdates()
+
 
 
 
 	// no throwing the "syncing" balls onto the field:
 	chl <- ARR_LOAD_CUR
 
-	chr <- ARR_READ_TOT
+	chr <- ARR_READ_CUR
+
+	chu <- ARR_UPDATE_CUR
 
 	cht <- int64(0)
 
 
 	renderTemplateNewCompile( w ,"main_body_chart", c )	
 	Flush1(w)
-	Flush1(w)
-	Flush1(w)
 	
 	
-	// the tailing cursor is the one who sends the quit signal
+	// the tailing cursor and stopHandlers may send a quit signal via cq
 	x := <- cq
 	log.Println("quit signal received: ", x)
 
@@ -427,12 +543,13 @@ func startHandler(w http.ResponseWriter, r *http.Request, params string) {
 	tsFinish := time.Now().Unix()
 	elapsed  := (tsFinish-tsStart)
 	log.Println("tsFinish: ",tsFinish, " Dauer: " , elapsed )
-	loadTotal,readTotal :=  finalReport()
+	loadTotal,readTotal,updateTotal :=  finalReport()
 	var percentage float64 = float64(tailTotal)/float64(loadTotal)
 	percentage = math.Trunc(percentage*1000)/10
 	readPerSec :=  int64(   math.Trunc(float64(readTotal)/float64(elapsed))   )
+	updatePerSec :=  int64(   math.Trunc(float64(updateTotal)/float64(elapsed))   )
 	c["Body"] = "==================================================<br>\n"
-	c["Body"] = fmt.Sprintf( "Read/s-Loaded-Tailed: %8v - %v - %v - %v%%", readPerSec,loadTotal,tailTotal,percentage ) 
+	c["Body"] = fmt.Sprintf( "Read/s-Loaded-Tailed: %8v - %8v - %v - %v - %v%%", readPerSec,updatePerSec,loadTotal,tailTotal,percentage ) 
 	renderTemplatePrecompile( w ,"main_body", c )	
 
 	renderTemplatePrecompile( w ,"main_footer", c )	
@@ -478,7 +595,7 @@ func spawnReads(){
 		
 
 		atomic.AddInt32( &READER_COUNTER, 1, )
-		go loadRead( lc, false )
+		go loadRead( lc )
 		monotonicInc++
 	}
 
@@ -486,21 +603,59 @@ func spawnReads(){
 
 
 
-func x1_________________________(){}
+func spawnUpdates(){
 
 
-func getConn() mongo.Conn {
+	monotonicInc := int32(0)
+	for {
+		
+		lc := atomic.LoadInt32( &UPDATER_COUNTER )
+		if lc > UPDATERS_CONC_MAX-1 {
+			time.Sleep( 500 * time.Millisecond )
+			continue
+		}
+		
 
-	conn, err := mongo.Dial("localhost:27001")
-	if err != nil {
-		log.Println("getConn failed")
-		log.Fatal(err)
+		atomic.AddInt32( &UPDATER_COUNTER, 1, )
+		go loadUpdate( lc )
+		monotonicInc++
 	}
-	return conn
 
 }
 
 
+
+func x1___mongo_access_stuff__(){}
+
+
+func getConn() mongo.Conn {
+
+	conn, err := mongo.Dial( CFG.Main.ConnectionString )	
+	if err != nil {
+		log.Println("getConn failed")
+		log.Fatal(err)
+	}
+
+	if len(CFG.Main.DbUsername) > 0 {
+		dbForAuthApp  := mongo.Database{conn, CFG.Main.DatabaseName, mongo.DefaultLastErrorCmd}	// database object for authentication
+		errAuth1 := dbForAuthApp.Authenticate(CFG.Main.DbUsername, CFG.Main.DbPassword) 
+		if errAuth1 != nil {
+			log.Println("auth1 failed")
+			log.Fatal(errAuth1)
+		}
+
+		dbForAuthLocal  := mongo.Database{conn, "local", mongo.DefaultLastErrorCmd}	// database object for authentication
+		errAuth2 := dbForAuthLocal.Authenticate(CFG.Main.DbUsername, CFG.Main.DbPassword) 
+		if errAuth2 != nil {
+			log.Println("auth2 failed")
+			log.Fatal(errAuth2)
+		}
+
+	}
+
+	return conn
+
+}
 
 
 
@@ -532,15 +687,18 @@ func getOplogCollection(conn mongo.Conn, colName string, silent bool) mongo.Coll
 
 func initDestinationCollections(conn mongo.Conn) (mongo.Collection, mongo.Collection){
 	
+
 	// create a capped collection if it is empty
-	colChangeLog := getCollection( conn, changelogDb, changelogCol  )
-	colChangelogCounter := getCollection( conn, changelogDb, counterChangeLogCol)
+	colChangeLog := getCollection( conn, CFG.Main.DatabaseName, changelogCol  )
+	colChangelogCounter := getCollection( conn, CFG.Main.DatabaseName, counterChangeLogCol)
 
 	n, _ := colChangeLog.Find(nil).Count()
+
+
 	if n>0   {
 		log.Println("capped oplog ",changelogFullPath,"already exists. Entries: ", n)
 	} else {
-		dbChangeLog  := mongo.Database{conn, changelogDb, mongo.DefaultLastErrorCmd}	// get a database object
+		dbChangeLog  := mongo.Database{conn, CFG.Main.DatabaseName, mongo.DefaultLastErrorCmd}	// get a database object
 		errCreate := dbChangeLog.Run(
 			mongo.D{
 				{"create", fmt.Sprint( changelogCol ) },
@@ -549,8 +707,13 @@ func initDestinationCollections(conn mongo.Conn) (mongo.Collection, mongo.Collec
 			},
 			nil,
 		)
+
 		if errCreate != nil {
-			log.Fatal(errCreate)
+			if errCreate.Error() == "collection already exists" {
+				log.Println("capped oplog ",changelogFullPath,"already exists")			
+			} else {
+				log.Fatal("dbChangeLog creation failed. err: ", errCreate)
+			}
 		} else {
 			log.Println("capped oplog ",changelogFullPath,"created")
 		}
@@ -559,6 +722,7 @@ func initDestinationCollections(conn mongo.Conn) (mongo.Collection, mongo.Collec
 	if errCounter != nil {
 		log.Fatal("lf11 ",errCounter)
 	}
+	
 	return colChangeLog, colChangelogCounter
 	
 }
@@ -570,7 +734,7 @@ func getColSizes(printDetails bool)(size1,size2 int64, err error){
 	defer conn.Close()
 
 	var db mongo.Database
-	db = mongo.Database{conn, changelogDb, mongo.DefaultLastErrorCmd}
+	db = mongo.Database{conn, CFG.Main.DatabaseName, mongo.DefaultLastErrorCmd}
 	// 	err = db.Run(D{{"drop", collectionName}}, nil)
 	var m mongo.M
 	
@@ -620,9 +784,10 @@ func getColSizes(printDetails bool)(size1,size2 int64, err error){
 
 
 // clearAll cleans up after previous runs of this applications.
+// unused
 func clearAll(conn mongo.Conn) {
 	log.Print("\n\n== Clear documents and indexes created by previous run. ==\n")
-	db := mongo.Database{conn, changelogDb, mongo.DefaultLastErrorCmd}
+	db := mongo.Database{conn, CFG.Main.DatabaseName, mongo.DefaultLastErrorCmd}
 	db.Run(mongo.D{{"profile", 0}}, nil)
 	db.C(offers).Remove(nil)
 	db.Run(mongo.D{{"dropIndexes", offers}, {"index", "*"}}, nil)
@@ -632,7 +797,7 @@ func clearAll(conn mongo.Conn) {
 
 
 
-func x2_________________________(){}
+func x2________tailing__________(){}
 
 
 
@@ -731,7 +896,6 @@ func iterateTailCursor( oplogsubscription mongo.Collection , oplogSubscriptionCo
 			var innerMap mongo.M = nil
 
 			ns := m["ns"].(string) 
-			//log.Printf("%+v %T -  vs. %v\n",ns, ns, changelogFullPath)
 
 			if   ! strings.HasPrefix( ns ,changelogFullPath)  {
 
@@ -893,7 +1057,7 @@ func iterateCursor(c mongo.Cursor ){
 
 
 
-func x3_________________________(){}
+func x3_________reporting_______(){}
 
 
 func startTimerLog(){
@@ -904,30 +1068,33 @@ func startTimerLog(){
 	const layout3 = " 05.0 "
 	// http://digital.ni.com/public.nsf/allkb/A98D197224CB83B486256BC100765C4B
 
+
 	timeStart := time.Now()
-	log.Print( timeStart.Format( layout3 ) )
+	//log.Print( timeStart.Format( layout3 ) )
 	ctick := time.Tick(intervalTimer * time.Millisecond)
 
 	i := int64(0)
 
 
 
+
 	go func() { 
 		for now := range ctick {
+
 
 			// header every x secs
 			if i % 40 == 0 {
 				fmt.Printf("\n")				
-				fmt.Printf("\n%10s%10s%10s%14s%10s","seq_rd","insert","tail","lag","sz_col")
+				fmt.Printf("\n%10s%10s%10s%10s%14s%10s","seq_rd","insert","update","tail","lag","sz_col")
 				fmt.Printf("\n")
-				fmt.Print( strings.Repeat("=",10*5+4) )
+				fmt.Print( strings.Repeat("=",10*6+4) )
 			}
 
 			csvRecord = make(map[string]int64)		// make new map
 			//csvRecord["time"] = time.Now().Unix()
 
 			fmt.Print("\n")
-			writeLoadReadInfo()
+			writeLoadReadUpdateInfo()
 			writeTailInfo(now,timeStart, float64(intervalTimer))
 
 
@@ -967,7 +1134,7 @@ func startTimerLog(){
 
 
 
-func writeLoadReadInfo() {
+func writeLoadReadUpdateInfo() {
 	
 		ARR_READ_CUR, ok := (<- chr)
 		if ok {
@@ -978,7 +1145,7 @@ func writeLoadReadInfo() {
 			}
 			sum *= readBatchSize
 			fmt.Printf("%10v",sum)			
-			csvRecord["K Reads per Sec"] = sum / 1000
+			csvRecord["Reads per Sec * 1000"] = sum / 1000
 			arrReadCurNew := make( []int64, len(ARR_READ_CUR) )
 			chr <- arrReadCurNew
 	
@@ -1004,6 +1171,23 @@ func writeLoadReadInfo() {
 			log.Fatal("error reading from chl 3")
 		}
 
+
+		ARR_UPDATE_CUR, ok := (<- chu)
+		if ok {
+			sum := int64(0)
+			for k,v := range ARR_UPDATE_CUR {
+				sum += int64(v)
+				ARR_UPDATE_TOT[k] += int64(v)
+			}
+			//sum *= updateBatchSize
+			fmt.Printf("%10v",sum)			
+			csvRecord["Updates per Sec * 10"] = sum / 10
+			arrUpdateCurNew := make( []int64, len(ARR_UPDATE_CUR) )
+			chu <- arrUpdateCurNew
+	
+		} else {
+			log.Fatal("error Updateing from chu 3")
+		}
 	
 }
 
@@ -1029,7 +1213,7 @@ func writeTailInfo(now time.Time, timeStart time.Time, intervalTimer float64){
 		}
 		*/
 		fmt.Printf( "%10v",perSec )			
-		csvRecord["Tails per Sec"] = int64(perSec)
+		csvRecord["Tails per Sec * 10"] = int64(perSec) / 10
 		
 	
 	
@@ -1083,6 +1267,21 @@ func incLoadCounter(i int64, idxThread int32){
 	
 }
 
+
+func incUpdateCounter(i int64, idxThread int32){
+	
+		const chunkSize = 100
+		if (i+1) % chunkSize == 0 {
+			ARR_UPDATE_CUR, ok := (<- chu)
+			if ok {
+				ARR_UPDATE_CUR[idxThread] += chunkSize
+				chu <- ARR_UPDATE_CUR
+			} else {
+				log.Fatal("error reading from chu 2")
+			}
+		}
+	
+}
 
 
 func tailCursorLogInc(newInsertSaveTime,newTimeOplog int64) (x,y int64) {
@@ -1147,10 +1346,11 @@ func tailCursorLagReport()(lastLag int64,lagTrail string){
 	
 
 
-func finalReport() (x int64, y int64){
+func finalReport() (x,y,z int64){
 
 	var loadTotal = int64(0)
 	var readTotal = int64(0)
+	var updateTotal = int64(0)
 	
 
 	ARR_LOAD_CUR, ok1 := (<- chl)
@@ -1177,8 +1377,23 @@ func finalReport() (x int64, y int64){
 		log.Fatal("error reading from chr 1")
 	}
 
-	return loadTotal, readTotal 
 	 
+
+	ARR_UPDATE_CUR, ok3 := (<- chu)
+	if ok3 {
+		for k,_ := range ARR_UPDATE_CUR {
+			v2 := ARR_UPDATE_TOT[k]
+			v2 *= updateBatchSize
+			updateTotal += v2
+			log.Printf("Thread %v - Update ops %v - ", k , v2)
+		}
+	} else {
+		log.Fatal("error Updateing from chu 1")
+	}
+
+	return loadTotal, readTotal, updateTotal 
+	 
+
 	
 }
 
@@ -1192,14 +1407,16 @@ func loadInsert(idxThread int32 , batchStamp int64){
 
 	conn := getConn()
 	defer conn.Close()
-	colOffers := getCollection( conn, changelogDb, offers  )
+	colOffers := getCollection( conn, CFG.Main.DatabaseName, offers  )
 	
 	for i:=batchStamp ; i < batchStamp+insertsPerThread; i++ {
 		
 		err := colOffers.Insert(mongo.M{"offerId": i,
-			 "shopId"	 : 20, 
-			 "lastSeen"   : int32(time.Now().Unix()) ,
-			 "categoryId" : 15 ,
+			 "shopId"	       : 20, 
+			 "lastSeen"      : int32(time.Now().Unix()) ,
+			 "lastUpdated"   : int32(time.Now().Unix()) ,
+			 "countUpdates"  : 1 ,
+			 "categoryId"    : 15 ,
 			 "title":	   fmt.Sprint("title",i) ,
 			 //"description": strings.Repeat( fmt.Sprint("description",i), 31),
 			 "description": "new Array( 44 ).join( \"description\")",
@@ -1222,35 +1439,11 @@ func loadInsert(idxThread int32 , batchStamp int64){
 
 
 
-func funcLoadRead()  func(idxThread int32, doUpdates bool) {
-
-	//newOid := mongo.NewObjectId()
-	//minOid := mongo.MinObjectIdForTime( tStart.Add(-200 * time.Millisecond))
-	minOid1999 := mongo.MinObjectIdForTime( time.Date(1999, time.November, 10, 15, 25, 0, 222, time.Local))
-	mgoCmd := fmt.Sprint( "db.getSiblingDB(\"offer-db\").offers.test.find({},{description:0}).min({_id: ObjectId(\"",minOid1999,"\") })" )
-	fmt.Println(mgoCmd)
-
-	mgoCmd  = fmt.Sprint( "db.getSiblingDB(\"offer-db\").offers.test.find({},{description:0}).sort({\"_id\":-1})" )
-	fmt.Println(mgoCmd)
-	
-
-	mgoCmd = fmt.Sprint( "db.getSiblingDB(\"offer-db\").oplog.subscription.find({},{im:0}).sort({\"_id\":-1})" )
-	fmt.Println(mgoCmd)
-
-	mgoCmd = fmt.Sprint( "db.getSiblingDB(\"offer-db\").oplog.subscription.counter.find({},{_id:0,changed3:0})" )
-	fmt.Println(mgoCmd)
-
-
-	mgoCmd = fmt.Sprint( "db.getSiblingDB(\"local\").oplog.rs.find({},{o:0}).sort({\"$natural\":-1})" )
-	fmt.Println(mgoCmd)
+func funcLoadRead()  func(idxThread int32) {
 
 
 
-
-	return func(idxThread int32, doUpdates bool ) {
-
-		doUpdates = ! doUpdates 
-
+	return func(idxThread int32 ) {
 
 		//fmt.Println( "loadRead: ", idxThread , batchStamp  )	
 		fctfuncRecurseMsg := funcRecurseMsg( fmt.Sprint("loadRead",idxThread," "))
@@ -1258,11 +1451,11 @@ func funcLoadRead()  func(idxThread int32, doUpdates bool) {
 
 		conn := getConn()
 		defer conn.Close()
-		colOffers := getCollection(conn,changelogDb,offers)
+		colOffers := getCollection(conn,CFG.Main.DatabaseName,offers)
 
 		getPartitionStart := funcPartitionStart()
 		
-		minOid,initMinOid:= getPartitionStart(idxThread )
+		minOid,initMinOid:= getPartitionStart(idxThread, false )
 		loopMinOid := initMinOid
 
 		i := int64(0)
@@ -1271,7 +1464,7 @@ func funcLoadRead()  func(idxThread int32, doUpdates bool) {
 			i++
 			imax := int64(10 * 1000)
 			if i > imax {
-				log.Println( fmt.Sprint(" more than ",imax," iterations. Tread over.") )		
+				//log.Println( fmt.Sprint(" more than ",imax," iterations. Tread over.") )		
 				break	
 			}
 			log.Print( fctfuncRecurseMsg() )
@@ -1288,14 +1481,14 @@ func funcLoadRead()  func(idxThread int32, doUpdates bool) {
 			tmpMinOid, ok := m["_id"].(mongo.ObjectId)
 			if ! ok {
 				if err.Error() == "mongo: cursor has no more results" {
-					fmt.Print(" rstrt",idxThread)
+					fmt.Print(" rd_rst1",idxThread)
 					loopMinOid = minOid
 					continue
 				} else {
 					log.Fatal("end of read seq. err: ", err)
 				}
 			} else if loopMinOid == tmpMinOid {
-					fmt.Print(" rstrtTWO",idxThread)
+				fmt.Print(" rd_rst2",idxThread)
 				loopMinOid = minOid
 				continue
 			} else {
@@ -1303,10 +1496,17 @@ func funcLoadRead()  func(idxThread int32, doUpdates bool) {
 				loopMinOid = tmpMinOid
 			}
 
+			lc := atomic.LoadInt32( &READER_COUNTER )
+			if lc > READERS_CONC_MAX {
+				fmt.Print(" rd_pruned",idxThread)
+				break
+			}
+			
+
 			
 		}
 		atomic.AddInt32( &READER_COUNTER, -1 )	
-		fmt.Print(" -ld_rd_",idxThread,"_finish")
+		fmt.Print(" -rd",idxThread,"_fin")
 
 
 
@@ -1316,15 +1516,126 @@ func funcLoadRead()  func(idxThread int32, doUpdates bool) {
 }
 
 
+
+
+func loadUpdate(idxThread int32 ) {
+
+	//fmt.Println( "loadUpdate: ", idxThread , batchStamp  )	
+	fctfuncRecurseMsg := funcRecurseMsg( fmt.Sprint("loadUpdate",idxThread," "))
+
+
+	conn := getConn()
+	defer conn.Close()
+	colOffers := getCollection(conn,CFG.Main.DatabaseName,offers)
+
+	getPartitionStart := funcPartitionStart()
+	
+	minOid,initMinOid:= getPartitionStart(idxThread, true )
+	minOidNextRead  := initMinOid
+
+
+	i := int64(0)
+	for  {
+
+		i++
+		imax := int64( 1000 * updateBatchSize  )
+		if i > imax {
+			//log.Println( fmt.Sprint(" more than ",imax," iterations. LoopUpdate over.") )		
+			break	
+		}
+		//fmt.Print( fmt.Sprint(" -u",i) )		
+
+
+	  cursor, errRd4Upd := colOffers.Find(  mongo.M{"_id": mongo.M{"$gte": minOidNextRead,},}).
+	  	Fields(mongo.M{"description": 0}).Limit(updateBatchSize).Cursor()
+		if errRd4Upd != nil   {
+
+			if errRd4Upd.Error() == "mongo: forupdate cursor has no more results" {
+				fmt.Print(" rd4upd_reset_1",idxThread)				
+				minOidNextRead = minOid
+				continue
+			}
+			log.Println(  fmt.Sprint( "mongo read4Update get oids error: ", errRd4Upd,"\n") )		
+			log.Fatal(errRd4Upd)
+		}
+		
+		
+		previousMinOidNextRead := minOidNextRead
+
+		j := int64(0)
+		for cursor.HasNext() {
+
+			j++
+			
+			var m mongo.M
+			errRdNext := cursor.Next(&m)
+			if errRdNext != nil {
+				log.Println(  fmt.Sprint( "mongo read4Update next cursor error: ", errRdNext,"\n") )		
+				log.Fatal(errRdNext)
+			}
+			tmpLoopOid, ok := m["_id"].(mongo.ObjectId)
+			if ! ok  {
+				log.Fatal("mongo read4Update can not read oid out of document")
+			}
+
+			now1 := int32(time.Now().Unix())
+			errUpd := colOffers.Update(  mongo.M{  "_id": mongo.M{"$gte": tmpLoopOid,  "$lte": tmpLoopOid,}  , }  ,
+		 	mongo.M{  "$inc": mongo.M{"lastSeen": -1, "countUpdates": 1} , "$set": mongo.M{"lastUpdated": now1 }  }  )
+			if errUpd != nil {
+				log.Println(  fmt.Sprint( "mongo read4Update update error: ", errUpd,"\n") )		
+				log.Fatal(errUpd)
+			}
+			
+			log.Print( fctfuncRecurseMsg() )
+			incUpdateCounter(updateBatchSize*i + j,idxThread)
+			_,_ =  tailCursorLogInc( time.Now().Unix() ,0)
+
+
+			minOidNextRead = tmpLoopOid
+
+			//printMap(m, false,"")
+		}
+
+		// we deliberately slow the single thread 
+		// so that we may scale in finer granularity
+		time.Sleep( 150 * time.Millisecond )
+
+		
+
+		if previousMinOidNextRead == minOidNextRead {
+			fmt.Print(" rd4upd_reset_2",idxThread)
+			minOidNextRead = minOid
+			continue
+		}
+
+
+		lc := atomic.LoadInt32( &UPDATER_COUNTER )
+		if lc > UPDATERS_CONC_MAX {
+			fmt.Print(" rd4upd_pruned",idxThread)
+			break
+		}
+		
+
+	}
+
+	
+	atomic.AddInt32( &UPDATER_COUNTER, -1 )	
+	fmt.Print(" -ld_upd",idxThread,"_fin")
+
+
+}
+
+
+
 /*
 	partitioning data, so that reads can start at different partitions
 
 */
-func funcPartitionStart() func(threadIdx int32) (x,y mongo.ObjectId){
+func funcPartitionStart() func(threadIdx int32, forReadOrUpdate bool) (x,y mongo.ObjectId){
 
 		conn := getConn()
 		defer conn.Close()
-		colOffers := getCollection(conn,changelogDb,offers)
+		colOffers := getCollection(conn,CFG.Main.DatabaseName,offers)
 		
 		
 
@@ -1377,9 +1688,14 @@ func funcPartitionStart() func(threadIdx int32) (x,y mongo.ObjectId){
 		diffTime := ctMax.Sub(ctMin)
 
 
-		return func(threadIdx int32)(minOid,minOidThreadPartition mongo.ObjectId) {
+		return func(threadIdx int32, forReadOrUpdate bool)(minOid,minOidThreadPartition mongo.ObjectId) {
 
-			partitionTimeDiff := time.Duration(threadIdx)*diffTime / time.Duration(READERS_CONC_MAX)
+			divisor := READERS_CONC_MAX
+			if forReadOrUpdate {
+				divisor = UPDATERS_CONC_MAX
+			}
+
+			partitionTimeDiff := time.Duration(threadIdx)*diffTime / time.Duration(divisor)
 			//fmt.Println("diff",diffTime, partitionTimeDiff)				
 			timeMinThread := ctMin.Add( partitionTimeDiff )
 			minOidThread  := mongo.MinObjectIdForTime( timeMinThread )
@@ -1393,7 +1709,7 @@ func funcPartitionStart() func(threadIdx int32) (x,y mongo.ObjectId){
 }
 
 
-func x5_________________________(){}
+func x5_______helpers___________(){}
 
 
 
@@ -1544,4 +1860,67 @@ func Reverse(s string) string{
 
 }
 
+
+func printHelperCommands(){
+
+	//newOid := mongo.NewObjectId()
+	//minOid := mongo.MinObjectIdForTime( tStart.Add(-200 * time.Millisecond))
+	minOid1999 := mongo.MinObjectIdForTime( time.Date(1999, time.November, 10, 15, 25, 0, 222, time.Local))
+	mgoCmd := fmt.Sprint( "db.getSiblingDB(\"offer-db\").offers.test.find({},{description:0}).min({_id: ObjectId(\"",minOid1999,"\") })" )
+	fmt.Println(mgoCmd)
+
+
+	mgoCmd = fmt.Sprint( "db.getSiblingDB(\"offer-db\").offers.test.find({},{description:0}).sort({\"_id\":-1})" )
+	fmt.Println(mgoCmd)
+	mgoCmd = fmt.Sprint( "db.getSiblingDB(\"offer-db\").offers.test.find({},{description:0}).sort({\"lastUpdated\":-1})" )
+	fmt.Println(mgoCmd)
+
+
+	sc := 1024*1024
+	mgoCmd = fmt.Sprint( "db.getSiblingDB(\"offer-db\").offers.test.stats(",sc," )" )
+	fmt.Println(mgoCmd)
+	
+	fmt.Println("")
+
+	mgoCmd = fmt.Sprint( "db.getSiblingDB(\"offer-db\").offers.test.ensureIndex( { \"lastUpdated\": 1 } )" )
+	fmt.Println(mgoCmd)
+	mgoCmd = fmt.Sprint( "db.getSiblingDB(\"offer-db\").offers.test.getIndexes()" )
+	fmt.Println(mgoCmd)
+	mgoCmd = fmt.Sprint( "db.getSiblingDB(\"offer-db\").offers.test.dropIndex(\"lastUpdated_1\")" )
+	fmt.Println(mgoCmd)
+
+
+
+	fmt.Println("")
+
+
+	mgoCmd = fmt.Sprint( "db.getSiblingDB(\"offer-db\").oplog.subscription.find({},{im:0}).sort({\"_id\":-1})" )
+	fmt.Println(mgoCmd)
+
+	mgoCmd = fmt.Sprint( "db.getSiblingDB(\"offer-db\").oplog.subscription.counter.find({},{_id:0,changed3:0})" )
+	fmt.Println(mgoCmd)
+
+
+	mgoCmd = fmt.Sprint( "db.getSiblingDB(\"local\").oplog.rs.find({},{o:0}).sort({\"$natural\":-1})" )
+	fmt.Println(mgoCmd)
+
+
+
+
+
+	
+}
+
+
+func loadConfig() error {
+
+	err := gcfg.ReadFileInto(&CFG, "config.ini")
+	if err != nil {
+		return err
+	} else {
+		fmt.Println("connect to ",CFG.Main.ConnectionString)
+		return nil	
+	}
+	
+}
 
