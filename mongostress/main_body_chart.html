@@ -9,6 +9,8 @@
 <div id='navi'  style='display:block; 
 	min-width: 200px; height: 600px; 
 	margin: 100 auto; 
+	padding-left:8px;
+	padding-top:8px;
 	background-color:#def; 
 	overflow:hidden;
 	float:left;
@@ -23,6 +25,8 @@
 <div id='navi'  style='display:block; 
 	min-width: 100px; height: 600px; 
 	margin: 100 auto; 
+	padding-left:8px;
+	padding-top:8px;
 	background-color:#cdf; 
 	overflow:hidden;
 	float:left;
@@ -88,7 +92,7 @@
 	</form>
 
 
-	<br>Load Threads<br>
+	<br>Insert Threads<br>
 	<form id='frmChangeLoadThreads'>
 		<a href='#'  onclick='javascript:changeThreadNumber(this,-1,"Load");return false;' accesskey='i' > < </a>
 		<input 
@@ -103,6 +107,24 @@
 			disabled='disabled'
 		/>
 	<a href='#'  onclick='javascript:changeThreadNumber(this,1,"Load");return false;' accesskey='j' > > </a><br>
+	</form>
+
+
+	<br>Update Threads<br>
+	<form id='frmChangeUpdateThreads'>
+		<a href='#'  onclick='javascript:changeThreadNumber(this,-1,"Update");return false;' accesskey='' > < </a>
+		<input 
+			type='text' 
+			id='inpUpdateThreads'
+			name='inpUpdateThreads'
+			value='2'
+			min=0 max=12 maxlength=2 
+			pattern="[0-9]+"
+			size=2  style='width:20px' autofocus='autofocus' 
+			placeholder='Anzahl Update Threads'
+			disabled='disabled'
+		/>
+	<a href='#'  onclick='javascript:changeThreadNumber(this,1,"Update");return false;' accesskey='' > > </a><br>
 	</form>
 
 
@@ -142,7 +164,8 @@
 		var pauseCharting = false;
 
 		var jsonMap = {};												// holds current performance data
-		jsonMap["K Reads per Sec"] = 0;
+		jsonMap["Reads per Sec * 1000"] = 0;
+		jsonMap["Updates per Sec * 10"] = 0;
 		jsonMap["Inserts per Sec * 10"] = 0;
 		jsonMap["Tails per Sec"] = 0;
 		jsonMap["Lag of Tail Cursor"] = 0;
@@ -151,9 +174,10 @@
 		var arrColors = new Array();
 		arrColors[0] = "#00377B";
 		arrColors[1] = "#F60";
-		arrColors[2] = "#647447";
-		arrColors[3] = "#EE0000";
-		arrColors[4] = "#529933";
+		arrColors[2] = "#EE0000";
+		arrColors[3] = "#529933";
+		arrColors[4] = "#647447";
+		arrColors[5] = "#eee";
 		
 
 		function generateSeriesInitData(){
