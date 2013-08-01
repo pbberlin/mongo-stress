@@ -596,6 +596,7 @@ func spawnReads(){
 
 		atomic.AddInt32( &READER_COUNTER, 1, )
 		go loadRead( lc )
+<<<<<<< HEAD
 		monotonicInc++
 	}
 
@@ -618,6 +619,8 @@ func spawnUpdates(){
 
 		atomic.AddInt32( &UPDATER_COUNTER, 1, )
 		go loadUpdate( lc )
+=======
+>>>>>>> bb5bde771fb9bd79decc5a8a90bd57f1ce91955d
 		monotonicInc++
 	}
 
@@ -625,6 +628,31 @@ func spawnUpdates(){
 
 
 
+<<<<<<< HEAD
+=======
+func spawnUpdates(){
+
+
+	monotonicInc := int32(0)
+	for {
+		
+		lc := atomic.LoadInt32( &UPDATER_COUNTER )
+		if lc > UPDATERS_CONC_MAX-1 {
+			time.Sleep( 500 * time.Millisecond )
+			continue
+		}
+		
+
+		atomic.AddInt32( &UPDATER_COUNTER, 1, )
+		go loadUpdate( lc )
+		monotonicInc++
+	}
+
+}
+
+
+
+>>>>>>> bb5bde771fb9bd79decc5a8a90bd57f1ce91955d
 func x1___mongo_access_stuff__(){}
 
 
@@ -637,6 +665,7 @@ func getConn() mongo.Conn {
 	}
 
 	if len(CFG.Main.DbUsername) > 0 {
+<<<<<<< HEAD
 		dbForAuthApp  := mongo.Database{conn, CFG.Main.DatabaseName, mongo.DefaultLastErrorCmd}	// database object for authentication
 		errAuth1 := dbForAuthApp.Authenticate(CFG.Main.DbUsername, CFG.Main.DbPassword) 
 		if errAuth1 != nil {
@@ -651,6 +680,14 @@ func getConn() mongo.Conn {
 			log.Fatal(errAuth2)
 		}
 
+=======
+		dbForAuth  := mongo.Database{conn, CFG.Main.DatabaseName, mongo.DefaultLastErrorCmd}	// database object for authentication
+		errAuth := dbForAuth.Authenticate(CFG.Main.DbUsername, CFG.Main.DbPassword) 
+		if errAuth != nil {
+			log.Println("auth failed")
+			log.Fatal(errAuth)
+		}
+>>>>>>> bb5bde771fb9bd79decc5a8a90bd57f1ce91955d
 	}
 
 	return conn
@@ -1587,9 +1624,29 @@ func loadUpdate(idxThread int32 ) {
 			}
 			
 			log.Print( fctfuncRecurseMsg() )
+<<<<<<< HEAD
 			incUpdateCounter(updateBatchSize*i + j,idxThread)
 			_,_ =  tailCursorLogInc( time.Now().Unix() ,0)
 
+=======
+			incUpdateCounter(i+j,idxThread)
+			_,_ =  tailCursorLogInc( time.Now().Unix() ,0)
+
+
+			minOidNextRead = tmpLoopOid
+
+			//printMap(m, false,"")
+		}
+
+
+		
+
+		if previousMinOidNextRead == minOidNextRead {
+			fmt.Print(" rd4upd_reset_2",idxThread)
+			minOidNextRead = minOid
+			continue
+		}
+>>>>>>> bb5bde771fb9bd79decc5a8a90bd57f1ce91955d
 
 			minOidNextRead = tmpLoopOid
 
@@ -1608,6 +1665,12 @@ func loadUpdate(idxThread int32 ) {
 			continue
 		}
 
+		lc := atomic.LoadInt32( &UPDATER_COUNTER )
+		if lc > UPDATERS_CONC_MAX {
+			fmt.Print(" rd4upd_pruned",idxThread)
+			break
+		}
+		
 
 		lc := atomic.LoadInt32( &UPDATER_COUNTER )
 		if lc > UPDATERS_CONC_MAX {
