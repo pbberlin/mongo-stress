@@ -86,7 +86,7 @@ var   changelogFullPath string
 
 var   mongoSecsEarlier mongo.Timestamp = mongo.Timestamp(5898548092499667758)	// limit timestamp
 
-const outputLevel = 0
+var outputLevel int = 0
 const insertCountIntoCollection bool = false
 
 const readBatchSize  = 100
@@ -145,7 +145,7 @@ func main(){
 	}
 	changelogFullPath = fmt.Sprint( CFG.Main.DatabaseName , "." , changelogCol )
 	
-
+	/*
 	freeMemTmp, err := OsFreeMemMB()
 	if err == nil {
 		freeMem = freeMemTmp
@@ -153,7 +153,17 @@ func main(){
 	} else {
 		log.Fatal(err)
 	}
+	*/
+	freeMem = 96 * 1000
 	
+	
+	resident, virtual, err := getServerStatsMemory(true)
+	if err == nil {
+		fmt.Printf("phys. Memory is %v - of data stock size of %v (useful only on mongod)\n",resident, virtual)
+	} else {
+		fmt.Println("no mem info", err )
+	}
+
 	
 	printHelperCommands()
 	
@@ -799,7 +809,55 @@ func getColSizes(printDetails bool)(size1,size2 int64, err error){
 	}
 
 	return
+
 	
+}
+
+
+
+
+
+/*
+		memory infos for a mongos are relatively USELESS
+
+*/
+func getServerStatsMemory(printDetails bool)(resident int, virtual int, err error){
+
+	conn := getConn()
+	defer conn.Close()
+
+	var db mongo.Database
+	db = mongo.Database{conn, CFG.Main.DatabaseName, mongo.DefaultLastErrorCmd}
+
+	var m mongo.M
+	mapMem := make( map[string]interface {} )
+	var ok bool
+
+	//db.runCommand({"serverStatus":1,"workingSet":1,"metrics":1,"locks":1,"repl":1,"indexCounters":1}) 
+	
+
+  //err = db.Run(  mongo.D{{"dbStats"    , 1}}, &m)
+	  err = db.Run(  mongo.D{{"serverStatus",1}}, &m)
+
+	
+	if err != nil {
+		log.Fatal("runcommand serverStatus failed: ", err)
+	} else {
+		//printMap(m,false,"")
+		mapMem,ok = m["mem"].( map[string]interface {} )
+		if ok {
+			//printMap(mapMem,false,"")
+			resident = mapMem["resident"].(int)
+			virtual  = mapMem["virtual"].(int)
+			
+		} else {
+			fmt.Println("Server Status map did not contain a map 'mem' - no memory info")	
+		}
+	}
+
+
+	return
+
 	
 }
 
@@ -1786,11 +1844,11 @@ func OsFreeMemMB()(membytes int64, err error) {
 		membytes = membytes >> 10		// MB
 		//membytes = membytes >> 10		// GB
 		
-		return
 	} else {
 		err = errors.New("could not parse output of free command - windows no worki")
-		return
 	}
+
+	return
 
 }
 
@@ -1937,6 +1995,16 @@ func printHelperCommands(){
 	mgoCmd = fmt.Sprint( "db.getSiblingDB(\"", CFG.Main.DatabaseName , "\").offers.test.dropIndex(\"lastUpdated_1\")" )
 	fmt.Println(mgoCmd)
 
+	mgoCmd = fmt.Sprint( "db.getSiblingDB(\"", CFG.Main.DatabaseName , "\").addUser(\"scale_tester\", \"32168\" )   " )
+	fmt.Println(mgoCmd)
+
+
+	fmt.Println("")
+
+	mgoCmd = fmt.Sprint( "sh.enableSharding(\"", CFG.Main.DatabaseName , "\") " )
+	fmt.Println(mgoCmd)
+	mgoCmd = fmt.Sprint( "sh.enableSharding(\"", CFG.Main.DatabaseName ,".", offers, "\" , {_id:1} ) " )
+	fmt.Println(mgoCmd)
 
 
 	fmt.Println("")
@@ -1948,11 +2016,12 @@ func printHelperCommands(){
 	mgoCmd = fmt.Sprint( "db.getSiblingDB(\"", CFG.Main.DatabaseName , "\").oplog.subscription.counter.find({},{_id:0,changed3:0})" )
 	fmt.Println(mgoCmd)
 
-
 	mgoCmd = fmt.Sprint( "db.getSiblingDB(\"local\").oplog.rs.find({},{o:0}).sort({\"$natural\":-1})" )
 	fmt.Println(mgoCmd)
 
+	// DBQuery.shellBatchSize = 1000;
 
+	fmt.Println()
 
 
 
