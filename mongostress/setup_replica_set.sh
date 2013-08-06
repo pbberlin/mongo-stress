@@ -61,7 +61,7 @@ small_files=""
 
 cd ~/mongo/program/bin; ./mongod --replSet rs1 --port=27001  --dbpath=/home/peter.buchmann/mongo/data_rs1/node1 --oplogSize 2000 $small_files   --logpath /home/peter.buchmann/mongo/data_rs1/node1/main.log --logappend --fork --rest --master
 cd ~/mongo/program/bin; ./mongod --replSet rs1 --port=27002  --dbpath=/home/peter.buchmann/mongo/data_rs1/node2 --oplogSize 2000 $small_files   --logpath /home/peter.buchmann/mongo/data_rs1/node2/main.log --logappend --fork --rest
-cd ~/mongo/program/bin; ./mongod --replSet rs1 --port=27003  --dbpath=/home/peter.buchmann/mongo/data_rs1/node3 --oplogSize 50    --smallfiles  --logpath /home/peter.buchmann/mongo/data_rs1/node3/main.log --logappend --fork --rest
+ycd ~/mongo/program/bin; ./mongod --replSet rs1 --port=27003  --dbpath=/home/peter.buchmann/mongo/data_rs1/node3 --oplogSize 50    --smallfiles  --logpath /home/peter.buchmann/mongo/data_rs1/node3/main.log --logappend --fork --rest
 
 
 echo giving them time to start. note this might not be enough time!

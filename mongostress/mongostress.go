@@ -80,7 +80,13 @@ const changelogCol string = "oplog.subscription"
 const counterChangeLogCol string = "oplog.subscription.counter"
 
 const shardErr = "can't use 'local' database through mongos"
+
+var checkMainDb  bool = true
+var checkLocalDb bool = true
+var checkAdminDb bool = true
+
 var oplogAccessible bool = true
+var checkOplog bool = true
 
 var   changelogFullPath string 
 
@@ -646,42 +652,68 @@ func getConn() mongo.Conn {
 		log.Fatal(err)
 	}
 
-	if len(CFG.Main.DbUsername) > 0 {
-		dbForAuthApp  := mongo.Database{conn, CFG.Main.DatabaseName, mongo.DefaultLastErrorCmd}	// database object for authentication
-		errAuth1 := dbForAuthApp.Authenticate(CFG.Main.DbUsername, CFG.Main.DbPassword) 
-		if errAuth1 != nil {
-			log.Println("auth1 failed")
-			log.Fatal(errAuth1)
-		}
 
-		if oplogAccessible {
-			dbForAuthLocal  := mongo.Database{conn, "local", mongo.DefaultLastErrorCmd}	
-			errAuth2 := dbForAuthLocal.Authenticate(CFG.Main.DbUsername, CFG.Main.DbPassword) 
-			if errAuth2 != nil {
-				if errAuth2.Error() == shardErr {
-						oplogAccessible = false
-						log.Print(" -no local db on shard")				
-						
-				}
-			} else {
-				log.Println(" -auth for local failed: ", errAuth2 , " trying anyway")
-			}
-		}
 
+
+	if checkMainDb {
+		success := checkDbAccess(conn,CFG.Main.DatabaseName,CFG.Main.DbUsername, CFG.Main.DbPassword)
+		if ! success {
+			log.Fatal("no access to main database.")
+		}
+		checkMainDb = false
 	}
 
 
-	if len(CFG.Main.DbAdminUsername) > 0 {
-			dbForAuthAdmin  := mongo.Database{conn, "admin", mongo.DefaultLastErrorCmd}	
-		errAuth3 := dbForAuthAdmin.Authenticate(CFG.Main.DbAdminUsername, CFG.Main.DbAdminPassword) 
-		if errAuth3 != nil {
-				log.Println(" -auth for admin failed: ", errAuth3 , " trying anyway")
-		}
+
+	if checkLocalDb {
+		oplogAccessible = checkDbAccess(conn,"local",CFG.Main.DbUsername, CFG.Main.DbPassword)
+		checkLocalDb = false
 	}
+
+
+	if checkAdminDb {
+		success := checkDbAccess(conn,"admin",CFG.Main.DbAdminUsername, CFG.Main.DbAdminPassword)
+		if ! success {
+			fmt.Println("no access to admin database.")
+		}
+		checkAdminDb = false
+	}
+
 
 
 	return conn
 
+}
+
+
+func checkDbAccess( conn mongo.Conn, dbName string, username string, password string ) bool {
+	
+	if checkLocalDb {
+		db  := mongo.Database{conn, dbName , mongo.DefaultLastErrorCmd}	
+		if len(username) > 0 {
+			errAuth := db.Authenticate(username, password) 
+			if errAuth != nil {
+				if errAuth.Error() == shardErr {
+					log.Println("db ",dbName, " not avaiable via shard ", errAuth )
+					return false
+				}
+			} else {
+				log.Println("auth for db ",dbName, " failed: ", errAuth )
+				return false
+			}
+		}	else {
+			var m mongo.M
+		  errAccess := db.Run(mongo.D{{"dbstats", 1}}, &m)	
+			if errAccess != nil {
+				log.Println("access to db ",dbName, " failed: ", errAccess )
+				return false
+			}
+		}
+	}
+
+	return true
+	
+	
 }
 
 
@@ -1515,14 +1547,15 @@ func loadInsert(idxThread int32 , batchStamp int64){
 	
 	for i:=batchStamp ; i < batchStamp+insertsPerThread; i++ {
 		
+		
 		err := colOffers.Insert(mongo.M{"offerId": i,
 			 "shopId"	       : 20, 
+			 "categoryId"    : 15,
 			 "lastSeen"      : int32(time.Now().Unix()) ,
 			 "lastUpdated"   : int32(time.Now().Unix()) ,
 			 "countUpdates"  : 1 ,
-			 "categoryId"    : 15 ,
-			 "title":	   fmt.Sprint("title",i) ,
-			 "description": strings.Repeat( fmt.Sprint("description",i), 31),
+			 "title"         : fmt.Sprint("title",i) ,
+			 "description"   : strings.Repeat( fmt.Sprint("description",i), 31),
 			 // server side javascript - even if possible - locks the entire collection
 			 //"description": "new Array( 44 ).join( \"description\")",					
 		})
@@ -1586,14 +1619,14 @@ func funcLoadRead()  func(idxThread int32) {
 			tmpMinOid, ok := m["_id"].(mongo.ObjectId)
 			if ! ok {
 				if err.Error() == "mongo: cursor has no more results" {
-					fmt.Print(" rd_rst1",idxThread)
+					fmt.Print(" rd",idxThread, "_rst1")
 					loopMinOid = minOid
 					continue
 				} else {
 					log.Fatal("end of read seq. err: ", err)
 				}
 			} else if loopMinOid == tmpMinOid {
-				fmt.Print(" rd_rst2",idxThread)
+				fmt.Print(" rd",idxThread, "_rst2")
 				loopMinOid = minOid
 				continue
 			} else {
@@ -1652,7 +1685,7 @@ func loadUpdate(idxThread int32 ) {
 
 
 	  cursor, errRd4Upd := colOffers.Find(  mongo.M{"_id": mongo.M{"$gte": minOidNextRead,},}).
-	  	Fields(mongo.M{"description": 0}).Limit(updateBatchSize).Cursor()
+	  	Fields(mongo.M{"_id": 1}).Limit(updateBatchSize).Cursor()
 		if errRd4Upd != nil   {
 
 			if errRd4Upd.Error() == "mongo: forupdate cursor has no more results" {
@@ -2003,7 +2036,7 @@ func printHelperCommands(){
 
 	mgoCmd = fmt.Sprint( "sh.enableSharding(\"", CFG.Main.DatabaseName , "\") " )
 	fmt.Println(mgoCmd)
-	mgoCmd = fmt.Sprint( "sh.enableSharding(\"", CFG.Main.DatabaseName ,".", offers, "\" , {_id:1} ) " )
+	mgoCmd = fmt.Sprint( "sh.shardCollection(\"", CFG.Main.DatabaseName ,".", offers, "\" , {_id: [\"hashed\",1] } ) " )
 	fmt.Println(mgoCmd)
 
 
