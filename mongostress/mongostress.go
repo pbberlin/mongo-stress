@@ -37,6 +37,7 @@ import (
 	"encoding/json"	
 	"regexp"
 	"code.google.com/p/gcfg"
+ 	"math/rand"	
 )
 
 
@@ -145,6 +146,8 @@ var CFG Config
 
 func main(){
 
+	rand.Seed(time.Now().UnixNano()) 
+	
 	errCfg := loadConfig()
 	if errCfg != nil {
 		log.Fatal(errCfg)
@@ -562,12 +565,11 @@ func startHandler(w http.ResponseWriter, r *http.Request, params string) {
 	loadTotal,readTotal,updateTotal :=  finalReport()
 	var percentage float64 = float64(tailTotal)/float64(loadTotal)
 	percentage = math.Trunc(percentage*1000)/10
-	readPerSec :=  int64(   math.Trunc(float64(readTotal)/float64(elapsed))   )
+	readPerSec   :=  int64(   math.Trunc(float64(readTotal)  /float64(elapsed))   )
 	updatePerSec :=  int64(   math.Trunc(float64(updateTotal)/float64(elapsed))   )
 	c["Body"] = "==================================================<br>\n"
 	c["Body"] = fmt.Sprintf( "Read/s-Loaded-Tailed: %8v - %8v - %v - %v - %v%%", readPerSec,updatePerSec,loadTotal,tailTotal,percentage ) 
 	renderTemplatePrecompile( w ,"main_body", c )	
-
 	renderTemplatePrecompile( w ,"main_footer", c )	
 
 	singleInstanceRunning = false
@@ -703,7 +705,7 @@ func checkDbAccess( conn mongo.Conn, dbName string, username string, password st
 			}
 		}	else {
 			var m mongo.M
-		  errAccess := db.Run(mongo.D{{"dbstats", 1}}, &m)	
+		  errAccess := db.Run(mongo.D{{"dbStats", 1}}, &m)	
 			if errAccess != nil {
 				log.Println("access to db ",dbName, " failed: ", errAccess )
 				return false
@@ -769,15 +771,15 @@ func initDestinationCollections(conn mongo.Conn) (mongo.Collection, mongo.Collec
 
 		if errCreate != nil {
 			if errCreate.Error() == "collection already exists" {
-				log.Println("capped oplog ",changelogFullPath,"already exists")			
+				log.Println("capped oplog journal ",changelogFullPath,"already exists")			
 			} else {
-				log.Fatal("dbChangeLog creation failed. err: ", errCreate)
+				log.Fatal("capped oplog journal creation failed. err: ", errCreate)
 			}
 		} else {
-			log.Println("capped oplog ",changelogFullPath,"created")
+			log.Println("capped oplog journal ",changelogFullPath,"created")
 		}
 	}
-	errCounter := colChangelogCounter.Upsert( mongo.M{"counter": mongo.M{"$exists": true}, } , mongo.M{"counter": 1}  ,)
+	errCounter := colChangelogCounter.Upsert( mongo.M{"counter": mongo.M{"$exists": true}, } , mongo.M{"counter": 0}  ,)
 	if errCounter != nil {
 		log.Fatal("lf11 ",errCounter)
 	}
@@ -942,11 +944,6 @@ func getTailCursor( oplog mongo.Collection ) mongo.Cursor  {
 	cursor, err := oplog.Find( mongo.M{"ts": mongo.M{ "$gte":mongoSecsEarlier}  }  ).Tailable(true).AwaitData(true).Sort( mongo.D{{"$natural", 1}} ).Cursor()
 
 
-	//fmt.Println(  " ts1 = Math.round( new Date().getTime()/1000) -300;" )
-	fmt.Println(  "ts2 = new Timestamp(",someSecsEarlier,", 0);" )
-	fmt.Println(  "db.getSiblingDB('local').oplog.rs.find({'ts': { '$gte': ts2 }  }, {ts:1,op:1}  ).sort( {\"$natural\": 1} ) " )
-
-
 	 	  
 	// .addOption(DBQuery.Option.tailable).addOption(DBQuery.Option.awaitData)
 	if err != nil {
@@ -1061,7 +1058,7 @@ func iterateTailCursor( oplogsubscription mongo.Collection , oplogSubscriptionCo
 
 				var errCounter error = nil
 				if insertCountIntoCollection {
-					errCounter = oplogSubscriptionCounter.Update( mongo.M{"counter": mongo.M{"$exists": true}, } , mongo.M{"$inc"   : mongo.M{"counter": 1} },)					
+					errCounter = oplogSubscriptionCounter.Update( mongo.M{"counter": mongo.M{"$exists": true}, } , mongo.M{"$inc"   : mongo.M{"counter": 1} },)	
 				}
 				if errCounter != nil {
 					log.Fatal("lf12 ",errCounter)
@@ -1547,9 +1544,18 @@ func loadInsert(idxThread int32 , batchStamp int64){
 	
 	for i:=batchStamp ; i < batchStamp+insertsPerThread; i++ {
 		
+		factor := 1000
+		shopRnd := rand.Intn(10*factor)   // this gives you an int up to but not including arg
+		shopId  := shopRnd
+
+		switch {
+			case shopRnd < 4*factor:  shopId = 1
+			case shopRnd < 8*factor:  shopId = 2
+			default: shopId = shopRnd
+		}
 		
 		err := colOffers.Insert(mongo.M{"offerId": i,
-			 "shopId"	       : 20, 
+			 "shopId"	       : shopId, 
 			 "categoryId"    : 15,
 			 "lastSeen"      : int32(time.Now().Unix()) ,
 			 "lastUpdated"   : int32(time.Now().Unix()) ,
@@ -1717,8 +1723,14 @@ func loadUpdate(idxThread int32 ) {
 			}
 
 			now1 := int32(time.Now().Unix())
-			errUpd := colOffers.Update(  mongo.M{  "_id": mongo.M{"$gte": tmpLoopOid,  "$lte": tmpLoopOid,}  , }  ,
-		 	mongo.M{  "$inc": mongo.M{"lastSeen": -1, "countUpdates": 1} , "$set": mongo.M{"lastUpdated": now1 }  }  )
+//			errUpd := colOffers.Update(  mongo.M{  "_id": mongo.M{"$gte": tmpLoopOid,  "$lte": tmpLoopOid,}  , }  ,
+//		 			mongo.M{  "$inc": mongo.M{"lastSeen": -1, "countUpdates": 1} ,
+//		 		 	"$set": mongo.M{"lastUpdated": now1 }  }  )
+
+			errUpd := colOffers.Update(  mongo.M{  "_id": tmpLoopOid, }  ,
+		 			mongo.M{  "$inc": mongo.M{"lastSeen": -1, "countUpdates": 1} ,
+		 		 	"$set": mongo.M{"lastUpdated": now1 }  }  )
+
 			if errUpd != nil {
 				log.Println(  fmt.Sprint( "mongo read4Update update error: ", errUpd,"\n") )		
 				log.Fatal(errUpd)
@@ -2018,6 +2030,12 @@ func printHelperCommands(){
 	sc := 1024*1024
 	mgoCmd = fmt.Sprint( "db.getSiblingDB(\"", CFG.Main.DatabaseName , "\").offers.test.stats(",sc," )" )
 	fmt.Println(mgoCmd)
+	fmt.Println( " db.runCommand( { serverStatus : 1 , scale : ", sc, " } )				")
+	fmt.Println( " db.runCommand( { dbStats :      1 , scale : ", sc, " } )				")
+	//fmt.Println( " db.runCommand( { shutdown: 1 } )				")
+	
+	
+	fmt.Println()
 	
 	fmt.Println("")
 
@@ -2051,9 +2069,11 @@ func printHelperCommands(){
 
 	mgoCmd = fmt.Sprint( "db.getSiblingDB(\"local\").oplog.rs.find({},{o:0}).sort({\"$natural\":-1})" )
 	fmt.Println(mgoCmd)
+	//fmt.Println(  " ts1 = Math.round( new Date().getTime()/1000) -300;" )
 
-	// DBQuery.shellBatchSize = 1000;
-
+	tenSecsEarlier := time.Now().Unix() - 10
+	fmt.Println(  "ts2 = new Timestamp(",tenSecsEarlier,", 0);" )
+	fmt.Println(  "db.getSiblingDB('local').oplog.rs.find({'ts': { '$gte': ts2 }  }, {ts:1,op:1}  ).sort( {\"$natural\": 1} ) " )
 	fmt.Println()
 
 

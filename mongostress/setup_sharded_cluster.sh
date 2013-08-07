@@ -32,6 +32,7 @@ rm -rf *
 mkdir -p /data/mongo/configdb
 mkdir -p /data/mongo/db/mongodb
 mkdir -p /data/mongo/db/mongodb/repair
+mkdir -p /data/mongo/mmslog
 mkdir -p /data/mongo/arb1
 chown -R mongodb:mongodb /data/mongo
 
@@ -39,6 +40,7 @@ chown -R mongodb:mongodb /data/mongo
 # start mongod
 mongod --replSet rset$SHARDNUMBER --config /etc/mongodb.conf
 #mongod --replSet rset1 --port=27021  --dbpath=/data/mongo/arb1 --logpath /data/mongo/arb1/arb.log  --oplogSize 50  --smallfiles  --logappend --fork --rest
+
 
 
 # set up replicaset on EACH of the following:
@@ -74,12 +76,34 @@ mongos --config /etc/mongos.conf
 mongo --host 46.16.76.100 --port 27017
 
 db.adminCommand( { listShards: 1 } )
-sh.addShard( "rset1/46.16.76.100:27020" )
+sh.addShard( "rset1/46.16.76.100:27020", "rset1 param does not matter" )
 sh.addShard( "rset2/46.16.78.17:27020" )
 sh.addShard( "rset3/46.16.78.151:27020" )
 
 
-sh.enableSharding("offer-db.offers.test" , {_id:"hashed"} ) 
+sh.enableSharding("offer-db") 
+sh.shardCollection("offer-db.offers.test" , {_id: ["hashed",1] } ) 
+
+sh.shardCollection("offer-db.offers.test" , {_id: "hashed"} ) 
+
+
+
+
+
+cd ~
+wget https://mms.10gen.com/settings/mmsAgent/90222bce0616c829f72a68f4eb1e3a9c/10gen-mms-agent-idealo.tar.gz
+tar xvzf ./10gen-mms-agent-idealo.tar.gz
+cd mms-agent
+
+wget https://bitbucket.org/pypa/setuptools/raw/bootstrap/ez_setup.py -O - | python
+python ez_setup.py
+
+easy_install pymongo
+
+
+cd ~/mms-agent
+nohup python agent.py > /data/mongo/mmslog/agent.log 2>&1 &
+less /data/mongo/mmslog/agent.log
 
 
 cd /root/ws_go/src/github.com/pbberlin/g1/mongostress/
