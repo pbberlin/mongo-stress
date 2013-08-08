@@ -157,7 +157,7 @@ func main(){
 	
 	errCfg := loadConfig()
 	if errCfg != nil {
-		log.Fatal("config load err:", errCfg)
+		log.Fatal(errCfg)
 	}
 	changelogFullPath = fmt.Sprint( CFG.Main.DatabaseName , "." , changelogCol )
 	nsToTrack = fmt.Sprint( CFG.Main.DatabaseName , "." , offers )	
@@ -664,7 +664,8 @@ func getConn() mongo.Conn {
 
 	conn, err := mongo.Dial( fmt.Sprint( CFG.Main.Host, ":", CFG.Main.Port ) )	
 	if err != nil {
-		log.Fatal("getConn1 failed", err)
+		log.Println("getConn failed")
+		log.Fatal(err)
 	}
 
 
@@ -832,7 +833,7 @@ func initDestinationCollections(conn mongo.Conn) (mongo.Collection, mongo.Collec
 			mongo.D{
 				{"create", fmt.Sprint( changelogCol ) },
 				{"capped", true},
-				{"size", 16 * 1024*1024 },
+				{"size", 1024*1024 },
 			},
 			nil,
 		)
@@ -892,36 +893,23 @@ func getColSizes(printDetails bool)(size1,size2 int64, err error){
 	}
 
 
-
-	for _,shardOrSelf := range SHARDS {
-
-		if oplogAccessible {
-
-			strConn := fmt.Sprint( shardOrSelf["ipAddress"], ":", shardOrSelf["portNumber"] )
-			lpConn, err := mongo.Dial( strConn )	
-			if err != nil {
-				log.Fatal("2 mongo.Dial failed for ", strConn, err)
+	if oplogAccessible {
+		db = mongo.Database{conn, "local", mongo.DefaultLastErrorCmd}
+		err = db.Run(mongo.D{{"collStats","oplog.rs" },{"scale",(1024*1024) }}, &m)
+		if err != nil {
+			fmt.Println(  fmt.Sprint("collStats for ", "local.oplog.rs" ," failed: "), err)
+		} else {
+			if printDetails {
+				fmt.Println( m["ns"] , " size: ", m["storageSize"], " MB" )			
 			}
-
-
-			db = mongo.Database{lpConn, "local", mongo.DefaultLastErrorCmd}
-			err = db.Run(mongo.D{{"collStats","oplog.rs" },{"scale",(1024*1024) }}, &m)
-			if err != nil {
-				fmt.Println(  fmt.Sprint("collStats for ", "local.oplog.rs" ," failed: "), err)
-			} else {
-				if printDetails {
-					fmt.Println( m["ns"] , " size: ", m["storageSize"], " MB" )			
-				}
-				tmpSize2,ok := m["storageSize"].(int)
-				if ok {
-					size2 += int64(tmpSize2)
-				}
+			tmpSize2,ok := m["storageSize"].(int)
+			if ok {
+				size2 = int64(tmpSize2)
 			}
 		}
-
+		
+		
 	}
-
-
 
 	return
 
@@ -986,7 +974,7 @@ func iterateCursor(c mongo.Cursor ){
 		var m mongo.M
 		err := c.Next(&m)
 		if err != nil {
-			log.Fatal("iterateCursor3 err: ",err)
+			log.Fatal(err)
 		}
 		printMap(m, false,"")
 	}
@@ -1015,7 +1003,7 @@ func getTailCursorMain( shardOrSelf map[string]string ) mongo.Cursor {
 	strConn := fmt.Sprint( shardOrSelf["ipAddress"], ":", shardOrSelf["portNumber"] )
 	conn, err := mongo.Dial( strConn )	
 	if err != nil {
-		log.Fatal("1 mongo.Dial failed for ", strConn, err)
+		log.Fatal("mongo.Dial failed for ", strConn, err)
 	}
 	
 	
@@ -1061,7 +1049,8 @@ func getTailCursorHelper( oplog mongo.Collection ) mongo.Cursor  {
 	 	  
 	// .addOption(DBQuery.Option.tailable).addOption(DBQuery.Option.awaitData)
 	if err != nil {
-		log.Fatal( fmt.Sprint( "mongo oplog find error: ", err,"\n") )
+		log.Println(   fmt.Sprint( "mongo oplog find error: ", err,"\n") )		
+		log.Fatal(err)
 	}
 
 	log.Println( " ... tailable cursor retrieved. Id ", cursor.GetId() )	
@@ -1148,7 +1137,7 @@ func iterateTailCursor( oplogsubscription mongo.Collection , oplogSubscriptionCo
 						var ok1 bool
 						oid, ok1  = moo["_id"].(mongo.ObjectId)
 						if !ok1 {
-							log.Fatal("cannot convert to ObjectId: ",err)
+							log.Fatal(err)
 						}
 
 					}
@@ -1157,32 +1146,15 @@ func iterateTailCursor( oplogsubscription mongo.Collection , oplogSubscriptionCo
 					log.Printf(" m[\"o\"] No object map (delete op) \n")
 				}
 
-				
-				// we have to sync the damn insert
-				// because all tail threads use oplogsubscription
-				// via the SAME mongo connection
-				cntTail,ok := (<- cht)
-				if ok {
-					errInsert := oplogsubscription.Insert(mongo.M{"ts": mongoSecsEarlier ,
-						  "operation": m["op"], 
-						  "oid" : oid ,
-						  "ns": ns,
-						  "im": innerMap,
-					})
-					if errInsert != nil {
-						if errInsert.Error() == "mongo: unknown response opcode -268435456"  ||   errInsert.Error() == "mongo: cursor has no more results"{
-							fmt.Println("oplog journal entry failed with 'opcode -268435456' or no more results - possible threads use the SAME connection")
-						} else {
-							log.Fatal(" oplog journal insert error: ",errInsert)						
-						}
-					} else {
-						//fmt.Println(" successful oplog journal entry")
-					}
-					cht  <- cntTail
-				} else {
-					print(" 1 cht is closed\n")
-				}						
-
+				err := oplogsubscription.Insert(mongo.M{"ts": mongoSecsEarlier ,
+					  "operation": m["op"], 
+					  "oid" : oid ,
+					  "ns": ns,
+					  "im": innerMap,
+				})
+				if err != nil {
+					log.Fatal(err)
+				}
 				printMap(m,true,"   ")
 
 
@@ -1236,23 +1208,25 @@ func iterateTailCursor( oplogsubscription mongo.Collection , oplogSubscriptionCo
 */
 func checkTailCursor( c mongo.Cursor  ) ( doBreak, hasNext  bool ){
 
-	if err := c.Err(); err != nil {
-		log.Println(   fmt.Sprint( "mongo permanent cursor error: ", err,"\n") )
-		return true, false
-	}
-
-	hasNext = 	c.HasNext()
-
-	// AFTER hasNext check !
 	alive   := false
 	if c.GetId() > 0 {
 		alive = true
+	}
+
+	hasNext = 	c.HasNext()
+	
+	if err := c.Err(); err != nil {
+		log.Println(   fmt.Sprint( "mongo permanent cursor error: ", err,"\n") )
+		return true, hasNext
 	}
 
 
 	if alive == false || hasNext == false {
 
 
+		if c.GetId() > 0 {
+			alive = true
+		}
 		if !alive  {
 			log.Print( fmt.Sprintf( " cursor is dead - id %v.", c.GetId()) )
 		}
@@ -1475,7 +1449,7 @@ func incTailCounter(){
 			cht  <- cntTail
 			//print("cntTail:",cntTail)
 		} else {
-			print(" 2 cht is closed\n")
+			print("cht is closed\n")
 		}						
 	
 }
@@ -1682,7 +1656,8 @@ func loadInsert(idxThread int32 , batchStamp int64){
 			 //"description": "new Array( 44 ).join( \"description\")",					
 		})
 		if err != nil {
-			log.Fatal(   fmt.Sprint( "mongo loadInsert error: ", err,"\n") )		
+			log.Println(   fmt.Sprint( "mongo loadInsert error: ", err,"\n") )		
+			log.Fatal(err)
 		}
 		log.Print( fctfuncRecurseMsg() )
 
@@ -1733,12 +1708,13 @@ func funcLoadRead()  func(idxThread int32) {
 			var m mongo.M
 		  err := colOffers.Find(mongo.M{"_id": mongo.M{"$gte": loopMinOid,},}).Fields(mongo.M{"description": 0}).Skip(readBatchSize).Limit(1).One(&m)
 			if err != nil  && err != mongo.Done {
-				log.Fatal(   fmt.Sprint( "mongo loadRead error: ", err,"\n") )		
+				log.Println(   fmt.Sprint( "mongo loadRead error: ", err,"\n") )		
+				log.Fatal(err)
 			}
 
 			tmpMinOid, ok := m["_id"].(mongo.ObjectId)
 			if ! ok {
-				if err.Error() == "mongo read: cursor has no more results" {
+				if err.Error() == "mongo: cursor has no more results" {
 					fmt.Print(" rd",idxThread, "_rst1")
 					loopMinOid = minOid
 					continue
@@ -1813,7 +1789,8 @@ func loadUpdate(idxThread int32 ) {
 				minOidNextRead = minOid
 				continue
 			}
-			log.Fatal(  fmt.Sprint( "mongo read4Update get oids error: ", errRd4Upd,"\n") )		
+			log.Println(  fmt.Sprint( "mongo read4Update get oids error: ", errRd4Upd,"\n") )		
+			log.Fatal(errRd4Upd)
 		}
 		
 		
@@ -1827,7 +1804,8 @@ func loadUpdate(idxThread int32 ) {
 			var m mongo.M
 			errRdNext := cursor.Next(&m)
 			if errRdNext != nil {
-				log.Fatal(  fmt.Sprint( "mongo read4Update next cursor error: ", errRdNext,"\n") )		
+				log.Println(  fmt.Sprint( "mongo read4Update next cursor error: ", errRdNext,"\n") )		
+				log.Fatal(errRdNext)
 			}
 			tmpLoopOid, ok := m["_id"].(mongo.ObjectId)
 			if ! ok  {
@@ -1844,7 +1822,8 @@ func loadUpdate(idxThread int32 ) {
 		 		 	"$set": mongo.M{"lastUpdated": now1 }  }  )
 
 			if errUpd != nil {
-				log.Fatal(  fmt.Sprint( "mongo read4Update update error: ", errUpd,"\n") )		
+				log.Println(  fmt.Sprint( "mongo read4Update update error: ", errUpd,"\n") )		
+				log.Fatal(errUpd)
 			}
 			
 			log.Print( fctfuncRecurseMsg() )
@@ -1990,7 +1969,7 @@ func OsFreeMemMB()(membytes int64, err error) {
 	cmd.Stdout = &out
 	err = cmd.Run()
 	if err != nil {
-		log.Fatal("OsFreeMemMB: ",err)
+		log.Fatal(err)
 	}
 	//fmt.Printf("\nfree says1: %q\n", out.String())
 	
