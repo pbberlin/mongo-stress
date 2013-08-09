@@ -523,7 +523,8 @@ func startHandler(w http.ResponseWriter, r *http.Request, params string) {
 
 
 	conn := getConn()
-	defer conn.Close()
+	time.Sleep( 100 * time.Millisecond )
+	conn.Close()
 
 
 	// Wrap connection with logger so that we can view the traffic to and from the server.
@@ -531,18 +532,17 @@ func startHandler(w http.ResponseWriter, r *http.Request, params string) {
 
 	// Clear the log prefix for more readable output.
 	log.SetFlags(0)
-	//clearAll(conn)
+	//cleanUpPreviousData(conn)
 
 	startTimerLog()
-	colChangeLog, colCounterChangeLog := initDestinationCollections(conn)
 
 
 	for k,_ := range SHARDS {
-		go iterateTailCursor(colChangeLog, colCounterChangeLog, SHARDS[k])		
+		go iterateTailCursor(SHARDS[k])		
 	}
 	
 	
-	time.Sleep( 200 * time.Millisecond )
+	time.Sleep( 100 * time.Millisecond )
 
 
 	go spawnInserts()
@@ -814,16 +814,11 @@ func getCollection(conn mongo.Conn, nameDb string, nameCol string  )(col mongo.C
 
 
 
-func initDestinationCollections(conn mongo.Conn) (mongo.Collection, mongo.Collection){
+func initDestinationCollections(conn mongo.Conn) (a,b,c,d mongo.Collection){
 	
-
 	// create a capped collection if it is empty
-	colChangeLog := getCollection( conn, CFG.Main.DatabaseName, changelogCol  )
-	colChangelogCounter := getCollection( conn, CFG.Main.DatabaseName, counterChangeLogCol)
-
+	colChangeLog        := getCollection( conn, CFG.Main.DatabaseName, changelogCol  )
 	n, _ := colChangeLog.Find(nil).Count()
-
-
 	if n>0   {
 		log.Println("capped oplog ",changelogFullPath,"already exists. Entries: ", n)
 	} else {
@@ -836,7 +831,6 @@ func initDestinationCollections(conn mongo.Conn) (mongo.Collection, mongo.Collec
 			},
 			nil,
 		)
-
 		if errCreate != nil {
 			if errCreate.Error() == "collection already exists" {
 				log.Println("capped oplog journal ",changelogFullPath,"already exists")			
@@ -847,12 +841,20 @@ func initDestinationCollections(conn mongo.Conn) (mongo.Collection, mongo.Collec
 			log.Println("capped oplog journal ",changelogFullPath,"created")
 		}
 	}
+
+	colChangelogCounter := getCollection( conn, CFG.Main.DatabaseName, counterChangeLogCol)
 	errCounter := colChangelogCounter.Upsert( mongo.M{"counter": mongo.M{"$exists": true}, } , mongo.M{"counter": 0}  ,)
 	if errCounter != nil {
 		log.Fatal("lf11 ",errCounter)
 	}
 	
-	return colChangeLog, colChangelogCounter
+	
+	colOffersByShop        := getCollection( conn, CFG.Main.DatabaseName, "offersByShop")
+	colOffersByLastUpdated := getCollection( conn, CFG.Main.DatabaseName, "offersByLastUpdated")
+	// todo: if shards exists - then shard those collections...	
+	
+	
+	return colChangeLog, colChangelogCounter, colOffersByShop, colOffersByLastUpdated
 	
 }
 
@@ -993,9 +995,9 @@ func iterateCursor(c mongo.Cursor ){
 }
 
 
-// clearAll cleans up after previous runs of this applications.
+// cleanUpPreviousData cleans up after previous runs of this applications.
 // unused
-func clearAll(conn mongo.Conn) {
+func cleanUpPreviousData(conn mongo.Conn) {
 	log.Print("\n\n== Clear documents and indexes created by previous run. ==\n")
 	db := mongo.Database{conn, CFG.Main.DatabaseName, mongo.DefaultLastErrorCmd}
 	db.Run(mongo.D{{"profile", 0}}, nil)
@@ -1073,7 +1075,12 @@ func getTailCursorHelper( oplog mongo.Collection ) mongo.Cursor  {
 
 
 
-func iterateTailCursor( oplogsubscription mongo.Collection , oplogSubscriptionCounter mongo.Collection, shardOrSelf map[string]string ){
+func iterateTailCursor( shardOrSelf map[string]string ){
+
+	conn := getConn()
+	defer conn.Close()
+
+	oplogSubscription, oplogSubscriptionCounter, colOffersByShop, colOffersByLastUpdated := initDestinationCollections(conn)
 
 
 	fctfuncRecurseMsg   := funcRecurseMsg("recursion ")
@@ -1125,49 +1132,105 @@ func iterateTailCursor( oplogsubscription mongo.Collection , oplogSubscriptionCo
 			if   strings.HasPrefix( ns ,nsToTrack)  {
 			//	if   ! strings.HasPrefix( ns ,changelogFullPath)  {
 
-				var ok bool = true	
-				mongoSecsEarlier,ok = m["ts"].(mongo.Timestamp)
+				var ok bool = true
+				var operationTimeStamp mongo.Timestamp	
+				var typeOfOp string
+				var mapOfSets map[string]interface{}
+				var lastUpdatedofOp int
+				
+				operationTimeStamp,ok = m["ts"].(mongo.Timestamp)
 				if ! ok {
 					log.Fatal("m[ts] not a valid timestamp")	
 				}
-				oplogOpTime := int64(mongoSecsEarlier) >> 32
+				oplogOpTime := int64(operationTimeStamp) >> 32
 				_,_ =  tailCursorLogInc( 0, oplogOpTime )	
 				
 				
 				
+				
 				var oid mongo.ObjectId = mongo.ObjectId("51dc1b9d419c")  // 12 chars
+				var shopId int
 
-				//str, ok := data.(string) - http://stackoverflow.com/questions/14289256/cannot-convert-data-type-interface-to-type-string-need-type-assertion
 				moo, ok := m["o"].(map[string]interface{})
 				if ok {
-
 					innerMap = moo
+					typeOfOp, ok = m["op"].(string)
+					if ok {
+						switch typeOfOp {
+						case "u" : 
+								//fmt.Print(" u")
+								oid = getOidFromMap( m["o2"] )
+								mapOfSets, ok = moo["$set"].(map[string]interface{})
+								if ok {
+									lastUpdatedofOp, ok = mapOfSets["lastUpdated"].(int)
+									if ok {
+										idCustom :=  fmt.Sprint(lastUpdatedofOp, "::" , oid)
+										errUpsert1 := colOffersByLastUpdated.Upsert( 
+											mongo.M{"_id": idCustom} , 
+											mongo.M{"_id": idCustom ,"fk_id": oid, "lastUpdated": lastUpdatedofOp, "op" : "u" })
+										if errUpsert1 != nil {
+											log.Fatal("OffersByLastUpdated u upsert error: ",errUpsert1, " shard ", shardOrSelf["shardId"])						
+										}
+									} else {
+										log.Printf(" mapOfSets[\"lastUpdated\"] - empty\n")																		
+									}
+								} else {
+									log.Printf(" moo[\"$set\"] - no last Update value\n")									
+								}
 
-					if moo["_id"] != nil {
+							
+						case "i" : 
+							//fmt.Print(" i")
+							oid = getOidFromMap( m["o"] )
+							lastUpdatedofOp, ok = moo["lastUpdated"].(int)
+							if ok {
+								idCustom :=  fmt.Sprint(lastUpdatedofOp, "::" , oid)
+								errUpsert2 := colOffersByLastUpdated.Upsert( 
+									mongo.M{"_id": idCustom} , 
+									mongo.M{"_id": idCustom ,"fk_id": oid, "lastUpdated": lastUpdatedofOp, "op" : "i" })
+								if errUpsert2 != nil {
+									log.Fatal("OffersByLastUpdated i upsert error: ",errUpsert2, " shard ", shardOrSelf["shardId"])						
+								}								
+							} else {
+								log.Printf(" map[o][lastUpdated] - empty\n")																		
+							}						
 
-						var ok1 bool
-						oid, ok1  = moo["_id"].(mongo.ObjectId)
-						if !ok1 {
-							log.Fatal("cannot convert to ObjectId: ",err)
+							shopId, ok = moo["shopId"].(int)
+							if ok {
+								idCustom :=  fmt.Sprint(shopId, "::" , oid)
+								errUpsert3 := colOffersByShop.Upsert( 
+									mongo.M{"_id": idCustom} , 
+									mongo.M{"_id": idCustom ,"fk_id": oid, "shopId": shopId, "op" : "i" })
+								if errUpsert3 != nil {
+									log.Fatal("colOffersByShop i upsert error: ",errUpsert3, " shard ", shardOrSelf["shardId"])						
+								}
+							} else {
+								log.Printf(" map[o][shopId] - empty\n")																		
+							}						
+
+
 						}
-
+					} else {
+						log.Printf(" m[\"op\"] - no operation type \n")
 					}
+
 
 				} else {
 					log.Printf(" m[\"o\"] No object map (delete op) \n")
 				}
 
+
 				
 				// we have to sync the damn insert
 				// because all tail threads use oplogsubscription
 				// via the SAME mongo connection
-				cntTail,ok := (<- cht)
-				if ok {
-					errInsert := oplogsubscription.Insert(mongo.M{"ts": mongoSecsEarlier ,
+//				cntTail,ok := (<- cht)
+//				if ok {
+					errInsert := oplogSubscription.Insert(mongo.M{"ts": operationTimeStamp ,
 						  "operation": m["op"], 
 						  "oid" : oid ,
-						  "ns": ns,
-						  "im": innerMap,
+						  "ns" :  ns,
+						  "im" :  innerMap,
 					})
 					if errInsert != nil {
 						if errInsert.Error() == "mongo: unknown response opcode -268435456"  ||   errInsert.Error() == "mongo: cursor has no more results"{
@@ -1178,10 +1241,10 @@ func iterateTailCursor( oplogsubscription mongo.Collection , oplogSubscriptionCo
 					} else {
 						//fmt.Println(" successful oplog journal entry")
 					}
-					cht  <- cntTail
-				} else {
-					print(" 1 cht is closed\n")
-				}						
+//					cht  <- cntTail
+//				} else {
+//					print(" 1 cht is closed\n")
+//				}						
 
 				printMap(m,true,"   ")
 
@@ -1254,14 +1317,14 @@ func checkTailCursor( c mongo.Cursor  ) ( doBreak, hasNext  bool ){
 
 
 		if !alive  {
-			log.Print( fmt.Sprintf( " cursor is dead - id %v.", c.GetId()) )
+			fmt.Print( fmt.Sprintf( " cursor is dead - id %v.", c.GetId()) )
 		}
 
 		if hasNext == false  {
-			log.Print( " hasNext() is false - await is over.")
+			fmt.Print( " hasNext() is false - await is over.")
 		}
 
-		log.Print( fmt.Sprintf( " dead or exhausted %v (max %v).", countNoNextValue, noNextValueMax) )
+		fmt.Print( fmt.Sprintf( " dead or exhausted %v (max %v).", countNoNextValue, noNextValueMax) )
 
 		countNoNextValue++
 		if countNoNextValue > noNextValueMax {
@@ -1738,7 +1801,7 @@ func funcLoadRead()  func(idxThread int32) {
 
 			tmpMinOid, ok := m["_id"].(mongo.ObjectId)
 			if ! ok {
-				if err.Error() == "mongo read: cursor has no more results" {
+				if err.Error() == "mongo: cursor has no more results" {
 					fmt.Print(" rd",idxThread, "_rst1")
 					loopMinOid = minOid
 					continue
@@ -2172,6 +2235,11 @@ func printHelperCommands(){
 	mgoCmd = fmt.Sprint( "sh.shardCollection(\"", CFG.Main.DatabaseName ,".", offers, "\" , {_id: [\"hashed\",1] } ) " )
 	fmt.Println(mgoCmd)
 
+	mgoCmd = fmt.Sprint( "sh.shardCollection(\"", CFG.Main.DatabaseName ,".", "offersByShop",        "\" , {shop: 1,_id: 1, } ) " )
+	fmt.Println(mgoCmd)
+	mgoCmd = fmt.Sprint( "sh.shardCollection(\"", CFG.Main.DatabaseName ,".", "offersByLastUpdated", "\" , {lastUpdated: 1,_id: 1, } ) " )
+	fmt.Println(mgoCmd)
+
 
 	fmt.Println("")
 
@@ -2209,3 +2277,28 @@ func loadConfig() error {
 	
 }
 
+func getOidFromMap( mp  interface{}  ) ( mongo.ObjectId ) {
+
+
+	var ok bool
+	var oid mongo.ObjectId = mongo.ObjectId("51dc1b9d419c")  // 12 chars
+
+	map2, ok := mp.(map[string]interface{})
+	if ok {
+		if 	_, ok  = map2["_id"]; ok {
+			oid, ok  = map2["_id"].(mongo.ObjectId)
+			if !ok {
+				log.Fatal("getOidFromMap cannot convert to ObjectId: ",map2)
+			}
+		} else {
+			log.Fatal("getOidFromMap cannot find key '_id' in ",map2)			
+		}
+	} else {
+			log.Fatal("getOidFromMap cannot convert to map[string]interface{}: ",mp)		
+	}
+
+
+
+	return oid
+	
+}
