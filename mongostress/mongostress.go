@@ -733,7 +733,7 @@ func getConn() mongo.Conn {
 		if ! oplogAccessible {
 
 			var m mongo.M
-			dbAdmin  := mongo.Database{conn, "admin", mongo.DefaultLastErrorCmd}	
+			dbAdmin   := mongo.Database{conn, "admin", mongo.DefaultLastErrorCmd}	
 		  errAccess := dbAdmin.Run(mongo.D{{"listShards", 1}}, &m)	
 			if errAccess != nil {
 				log.Println("listing of shards", errAccess )
@@ -745,9 +745,11 @@ func getConn() mongo.Conn {
 						//fmt.Printf("key: %v - %#v\n",k,v)
 						mShard, isMap :=  v.(  map[string]interface{} )
 						if isMap  {
-							//for k1,v1 := range mShard {
-							//	fmt.Printf("key: %#v - %#v\n",k1,v1)
-							//}
+							/*
+							for k1,v1 := range mShard {
+								fmt.Printf("key: %#v - %#v\n",k1,v1)
+							}
+							*/
 							shardId, ok1 := mShard["_id"].(string)
 							hostString, ok2 := mShard["host"].(string)
 							rsName := ""
@@ -758,13 +760,19 @@ func getConn() mongo.Conn {
 								aHost := strings.Split(hostString, "/")
 								//fmt.Printf("%#v \n",aHost)
 								rsName     = aHost[0]
-								aAddressPlusPort := strings.Split(aHost[1], ":")
+								
+								rsMembers := aHost[1]
+								firstMember := strings.Split(rsMembers, ",")
+
+								
+								aAddressPlusPort := strings.Split(firstMember[0], ":")
 								ipAddress  = aAddressPlusPort[0]
 								if len(ipAddress) > 1 {
 									portNumber  = aAddressPlusPort[1]	
 								}
-								mainKey := fmt.Sprint( shardId, "::", rsName, "::",ipAddress,"::", portNumber)	
-								//fmt.Println(mainKey)	
+								
+								mainKey := fmt.Sprint( shardId, " :: ", rsName, " :: ",ipAddress," :: ", portNumber)	
+								fmt.Println(mainKey)	
 								var tmpMap map[string]string = make( map[string]string )
 								tmpMap["shardId"]   = shardId
 								tmpMap["rsName"]    = rsName
@@ -785,7 +793,7 @@ func getConn() mongo.Conn {
 				}
 			}
 
-			fmt.Printf("%#v\n", SHARDS)	
+			//fmt.Printf("%#v\n", SHARDS)	
 			
 			if len(SHARDS) > 0 {
 				oplogAccessible = true	
@@ -808,7 +816,6 @@ func getConn() mongo.Conn {
 		checkLocalDb = false
 	}
 
-
 	return conn
 
 }
@@ -821,13 +828,13 @@ func checkDbAccess( conn mongo.Conn, dbName string, username string, password st
 		errAuth := db.Authenticate(username, password) 
 		if errAuth != nil {
 			if errAuth.Error() == shardErr {
-				log.Println("db ",dbName, " not avaiable via shard ", errAuth )
+				log.Println("db ",dbName, " not available via shard ", errAuth )
+				return false
+			} else {
+				log.Println("auth for db",dbName, "failed for",username,"-", password, ":", errAuth )
 				return false
 			}
-		} else {
-			log.Println("auth for db ",dbName, " failed: ", errAuth )
-			return false
-		}
+		} 
 	}	else {
 		var m mongo.M
 	  errAccess := db.Run(mongo.D{{"dbStats", 1}}, &m)	
@@ -853,16 +860,43 @@ func getCollection(conn mongo.Conn, nameDb string, nameCol string  )(col mongo.C
 }
 
 
+func authenticateMainDb( db mongo.Database){
+
+		if len(CFG.Main.DbUsername) > 0 {
+			errAuth := db.Authenticate(CFG.Main.DbUsername, CFG.Main.DbPassword) 
+			if errAuth != nil {
+				log.Println("2nd auth for workdb ",db, "failed for",CFG.Main.DbUsername, CFG.Main.DbPassword, ":", errAuth )
+			} 
+		}
+	
+}
+
+
+
+func authenticateAdminDb( db mongo.Database){
+
+		if len(CFG.Main.DbAdminUsername) > 0 {
+			errAuth := db.Authenticate(CFG.Main.DbAdminUsername, CFG.Main.DbAdminPassword) 
+			if errAuth != nil {
+				log.Fatal("2nd auth for admindb ",db, " failed for ",CFG.Main.DbAdminUsername," - ", CFG.Main.DbAdminPassword, ": ", errAuth )
+				
+			} 
+		}
+	
+}
+
 
 func initDestinationCollections(conn mongo.Conn) (a,b,c,d mongo.Collection){
 	
 	// create a capped collection if it is empty
 	colChangeLog        := getCollection( conn, CFG.Main.DatabaseName, changelogCol  )
 	n, _ := colChangeLog.Find(nil).Count()
-	if n>0   {
+	if n>0  {
 		log.Println("capped oplog ",changelogFullPath,"already exists. Entries: ", n)
 	} else {
 		dbChangeLog  := mongo.Database{conn, CFG.Main.DatabaseName, mongo.DefaultLastErrorCmd}	// get a database object
+		authenticateMainDb(dbChangeLog)
+		
 		errCreate := dbChangeLog.Run(
 			mongo.D{
 				{"create", fmt.Sprint( changelogCol ) },
@@ -873,12 +907,12 @@ func initDestinationCollections(conn mongo.Conn) (a,b,c,d mongo.Collection){
 		)
 		if errCreate != nil {
 			if errCreate.Error() == "collection already exists" {
-				log.Println("capped oplog journal ",changelogFullPath,"already exists")			
+				log.Println("1capped oplog journal ",changelogFullPath,"already exists")			
 			} else {
-				log.Fatal("capped oplog journal creation failed. err: ", errCreate)
+				log.Fatal("2capped oplog journal creation failed. err: ", errCreate)
 			}
 		} else {
-			log.Println("capped oplog journal ",changelogFullPath,"created")
+			log.Println("3capped oplog journal ",changelogFullPath,"created")
 		}
 	}
 
@@ -1056,16 +1090,24 @@ func cleanUpPreviousData(conn mongo.Conn) {
 func x2________tailing__________(){}
 
 
+
+
+
 func getTailCursorMain( shardOrSelf map[string]string ) mongo.Cursor {
 	
 	strConn := fmt.Sprint( shardOrSelf["ipAddress"], ":", shardOrSelf["portNumber"] )
 	conn, err := mongo.Dial( strConn )	
 	if err != nil {
-		log.Fatal("1 mongo.Dial failed for ", strConn, err)
+		log.Fatal("1 mongo.Dial failed for ", strConn, " -- ", err)
+	} else {
+		fmt.Println("\t(re-)connected to ", strConn)	
 	}
 	
-	
-	oplog  := getOplogCollection(conn, "", false)
+	dbLocalWithOplog  := mongo.Database{conn, "local", mongo.DefaultLastErrorCmd}	
+	dbAdminForAuth    := mongo.Database{conn, "admin", mongo.DefaultLastErrorCmd}	
+	authenticateAdminDb(dbAdminForAuth)
+	oplog	:= dbLocalWithOplog.C( "oplog.rs" )  
+
 	c := getTailCursorHelper(oplog)
 	return c	
 
@@ -1371,22 +1413,6 @@ func checkTailCursor( c mongo.Cursor  ) ( doBreak, hasNext  bool ){
 }
 
 
-func getOplogCollection(conn mongo.Conn, colName string, silent bool) mongo.Collection {
-	
-	if colName == "" {
-		colName = 	"oplog.rs"
-	}
-	
-	if silent {
-	} else {
-		log.Print(  fmt.Sprint("\n\n==(re-)connect_to_",colName,"== ... ") )
-	}
-	dbOplog  := mongo.Database{conn, "local", mongo.DefaultLastErrorCmd}	// get a database object
-	oplog	:= dbOplog.C( colName )  // get collection
-	
-	return oplog
-
-}
 
 
 
@@ -2261,12 +2287,12 @@ func printHelperCommands(){
 
 	mgoCmd = fmt.Sprint( "sh.enableSharding(\"", CFG.Main.DatabaseName , "\") " )
 	fmt.Println(mgoCmd)
-	mgoCmd = fmt.Sprint( "sh.shardCollection(\"", CFG.Main.DatabaseName ,".", offers, "\" , {_id: [\"hashed\",1] } ) " )
+	mgoCmd = fmt.Sprint( "sh.shardCollection(\"", CFG.Main.DatabaseName ,".", offers, "\" , {_id: 1 } )  // hashed instead of 1 " ) 
 	fmt.Println(mgoCmd)
 
-	mgoCmd = fmt.Sprint( "sh.shardCollection(\"", CFG.Main.DatabaseName ,".", "offersByShop",        "\" , {shop: 1,_id: 1, } ) " )
+	mgoCmd = fmt.Sprint( "sh.shardCollection(\"", CFG.Main.DatabaseName ,".", "offersByShop",        "\" , {_id: 1, } ) " )
 	fmt.Println(mgoCmd)
-	mgoCmd = fmt.Sprint( "sh.shardCollection(\"", CFG.Main.DatabaseName ,".", "offersByLastUpdated", "\" , {lastUpdated: 1,_id: 1, } ) " )
+	mgoCmd = fmt.Sprint( "sh.shardCollection(\"", CFG.Main.DatabaseName ,".", "offersByLastUpdated", "\" , {_id: 1, } ) " )
 	fmt.Println(mgoCmd)
 
 
@@ -2348,3 +2374,6 @@ func checkWriteBack( mark string , err error, shardName string){
 	}
 	
 }
+
+
+
