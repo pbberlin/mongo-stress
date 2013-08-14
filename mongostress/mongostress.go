@@ -38,6 +38,9 @@ import (
 	"regexp"
 	"code.google.com/p/gcfg"
  	"math/rand"	
+ 	"flag"
+ 	"runtime/pprof"
+ 	"runtime/debug"
 )
 
 
@@ -85,6 +88,7 @@ var changelogFullPath string
 
 
 const shardErr = "can't use 'local' database through mongos"
+const writebackErr = "writeback waitfor for older id"
 
 var checkMainDb  bool = true
 var checkAdminDb bool = true
@@ -150,8 +154,27 @@ var CFG Config
 
 var SHARDS map[string]map[string]string  = make( map[string]map[string]string )
 
+var cpuprofile = flag.String("cpuprofile", "", "write cpu profile to file")
 
-func main(){
+
+var updateSecondaryIndize int32 = 0
+
+
+var xx1 int32 = 0
+
+func main() {
+
+    flag.Parse()
+    if *cpuprofile != "" {
+        f, err := os.Create(*cpuprofile)
+        if err != nil {
+            log.Fatal(err)
+        }
+        pprof.StartCPUProfile(f)
+        defer pprof.StopCPUProfile()
+    }
+
+
 
 	rand.Seed(time.Now().UnixNano()) 
 	
@@ -192,7 +215,8 @@ func main(){
   http.HandleFunc("/changeLoadThreads/" , subClassOfHandlerFunc(changeLoadThreads))
   http.HandleFunc("/changeReadThreads/" , subClassOfHandlerFunc(changeReadThreads))
   http.HandleFunc("/changeUpdateThreads/" , subClassOfHandlerFunc(changeUpdateThreads))
-  http.HandleFunc("/getThreadCounts/" , subClassOfHandlerFunc(getThreadCounts))
+  http.HandleFunc("/getConfigInfo/" , subClassOfHandlerFunc(getConfigInfo))
+  http.HandleFunc("/toggleSecondaryIndize/" , subClassOfHandlerFunc(toggleSecondaryIndize))
   http.HandleFunc("/reloadCfg/" , subClassOfHandlerFunc(reloadCfg))
   
   
@@ -250,7 +274,8 @@ func elseHandler(w http.ResponseWriter, r *http.Request) {
 		"changeLoadThreads": "changeLoadThreads",
 		"changeReadThreads": "changeReadThreads",
 		"changeUpdateThreads": "changeUpdateThreads",
-		"getThreadCounts": "getThreadCounts",
+		"getConfigInfo": "getConfigInfo",
+		"toggleSecondaryIndize": "toggleSecondaryIndize",
 		"reloadCfg": "reloadCfg",
 		
 		"command-without-handler":  "bla" ,
@@ -454,12 +479,13 @@ func dataHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 
-func getThreadCounts(w http.ResponseWriter, r *http.Request, params string) {
+func getConfigInfo(w http.ResponseWriter, r *http.Request, params string) {
 
 	var mapCounts map[string]int32 = make(map[string]int32)
 	mapCounts["inpLoadThreads"] = LOADERS_CONC_MAX
 	mapCounts["inpReadThreads"] = READERS_CONC_MAX
 	mapCounts["inpUpdateThreads"] = UPDATERS_CONC_MAX
+	mapCounts["inpUpdateSecondaryIndize"] = int32(updateSecondaryIndize)
  	arrByte,err := json.Marshal( mapCounts ) 
  	if err != nil {
 		p2(w,"Marshal Map to Json - %v",err) 		
@@ -469,6 +495,20 @@ func getThreadCounts(w http.ResponseWriter, r *http.Request, params string) {
  	}
 
  	
+}
+
+
+func toggleSecondaryIndize(w http.ResponseWriter, r *http.Request, params string) {
+	
+	if  updateSecondaryIndize > 0 {
+		updateSecondaryIndize = 0	
+	} else {
+		updateSecondaryIndize = 1
+	}
+ 	p2( w, "changing updateSecondaryIndize to %v\n", updateSecondaryIndize )
+	
+	//getConfigInfo(w , r , params )	
+	
 }
 
 func reloadCfg(w http.ResponseWriter, r *http.Request, params string) {
@@ -845,7 +885,11 @@ func initDestinationCollections(conn mongo.Conn) (a,b,c,d mongo.Collection){
 	colChangelogCounter := getCollection( conn, CFG.Main.DatabaseName, counterChangeLogCol)
 	errCounter := colChangelogCounter.Upsert( mongo.M{"counter": mongo.M{"$exists": true}, } , mongo.M{"counter": 0}  ,)
 	if errCounter != nil {
-		log.Fatal("lf11 ",errCounter)
+		if errCounter.Error() == "isOk()" {
+			fmt.Print("skipping strange upsert error: ",errCounter)
+		} else {
+			checkWriteBack("lf11 ",errCounter, "mongos")
+		}
 	}
 	
 	
@@ -1022,7 +1066,6 @@ func getTailCursorMain( shardOrSelf map[string]string ) mongo.Cursor {
 	
 	
 	oplog  := getOplogCollection(conn, "", false)
-	//log.Println( "Oplog retrieved")	
 	c := getTailCursorHelper(oplog)
 	return c	
 
@@ -1080,7 +1123,8 @@ func iterateTailCursor( shardOrSelf map[string]string ){
 	conn := getConn()
 	defer conn.Close()
 
-	oplogSubscription, oplogSubscriptionCounter, colOffersByShop, colOffersByLastUpdated := initDestinationCollections(conn)
+	_, oplogSubscriptionCounter, colOffersByShop, colOffersByLastUpdated := initDestinationCollections(conn)
+	//oplogSubscription, oplogSubscriptionCounter, colOffersByShop, colOffersByLastUpdated := initDestinationCollections(conn)
 
 
 	fctfuncRecurseMsg   := funcRecurseMsg("recursion ")
@@ -1091,6 +1135,7 @@ func iterateTailCursor( shardOrSelf map[string]string ){
 		fmt.Println("no tail cursor on shard system")	
 		return
 	}
+
 
 	for {
 		
@@ -1147,114 +1192,101 @@ func iterateTailCursor( shardOrSelf map[string]string ){
 				
 				
 				
-				
 				var oid mongo.ObjectId = mongo.ObjectId("51dc1b9d419c")  // 12 chars
 				var shopId int
 
 				moo, ok := m["o"].(map[string]interface{})
-				if ok {
-					innerMap = moo
-					typeOfOp, ok = m["op"].(string)
+				
+				if updateSecondaryIndize > 0  {
 					if ok {
-						switch typeOfOp {
-						case "u" : 
-								//fmt.Print(" u")
-								oid = getOidFromMap( m["o2"] )
-								mapOfSets, ok = moo["$set"].(map[string]interface{})
-								if ok {
-									lastUpdatedofOp, ok = mapOfSets["lastUpdated"].(int)
+						innerMap = moo
+						typeOfOp, ok = m["op"].(string)
+						if ok   {
+							switch typeOfOp {
+							case "u" : 
+									//fmt.Print(" u")
+									oid = getOidFromMap( m["o2"] )
+									mapOfSets, ok = moo["$set"].(map[string]interface{})
 									if ok {
-										idCustom :=  fmt.Sprint(lastUpdatedofOp, "::" , oid)
-										errUpsert1 := colOffersByLastUpdated.Upsert( 
-											mongo.M{"_id": idCustom} , 
-											mongo.M{"_id": idCustom ,"fk_id": oid, "lastUpdated": lastUpdatedofOp, "op" : "u" })
-										if errUpsert1 != nil {
-											log.Fatal("OffersByLastUpdated u upsert error: ",errUpsert1, " shard ", shardOrSelf["shardId"])						
+										lastUpdatedofOp, ok = mapOfSets["lastUpdated"].(int)
+										if ok {
+											idCustom :=  fmt.Sprint(lastUpdatedofOp, "::" , oid, "::", shardOrSelf["ipAddress"])
+											errUpsert1 := colOffersByLastUpdated.Upsert( 
+												mongo.M{"_id": idCustom} , 
+												mongo.M{"_id": idCustom ,"fk_id": oid, "lastUpdated": lastUpdatedofOp, "op" : "u" })
+											checkWriteBack( "OffersByLastUpdated u upsert", errUpsert1,  shardOrSelf["shardId"])
+										} else {
+											log.Printf(" mapOfSets[\"lastUpdated\"] - empty\n")																		
 										}
 									} else {
-										log.Printf(" mapOfSets[\"lastUpdated\"] - empty\n")																		
+										log.Printf(" moo[\"$set\"] - no last Update value\n")									
 									}
+	
+								
+							case "i" : 
+								//fmt.Print(" i")
+								oid = getOidFromMap( m["o"] )
+								lastUpdatedofOp, ok = moo["lastUpdated"].(int)
+								if ok {
+									idCustom :=  fmt.Sprint(lastUpdatedofOp, "::" , oid, "::", shardOrSelf["ipAddress"])
+									errUpsert2 := colOffersByLastUpdated.Upsert( 
+										mongo.M{"_id": idCustom} , 
+										mongo.M{"_id": idCustom ,"fk_id": oid, "lastUpdated": lastUpdatedofOp, "op" : "i" })
+									checkWriteBack( "OffersByLastUpdated i upsert", errUpsert2,  shardOrSelf["shardId"])
+	
 								} else {
-									log.Printf(" moo[\"$set\"] - no last Update value\n")									
-								}
-
-							
-						case "i" : 
-							//fmt.Print(" i")
-							oid = getOidFromMap( m["o"] )
-							lastUpdatedofOp, ok = moo["lastUpdated"].(int)
-							if ok {
-								idCustom :=  fmt.Sprint(lastUpdatedofOp, "::" , oid)
-								errUpsert2 := colOffersByLastUpdated.Upsert( 
-									mongo.M{"_id": idCustom} , 
-									mongo.M{"_id": idCustom ,"fk_id": oid, "lastUpdated": lastUpdatedofOp, "op" : "i" })
-								if errUpsert2 != nil {
-									log.Fatal("OffersByLastUpdated i upsert error: ",errUpsert2, " shard ", shardOrSelf["shardId"])						
-								}								
-							} else {
-								log.Printf(" map[o][lastUpdated] - empty\n")																		
-							}						
-
-							shopId, ok = moo["shopId"].(int)
-							if ok {
-								idCustom :=  fmt.Sprint(shopId, "::" , oid)
-								errUpsert3 := colOffersByShop.Upsert( 
-									mongo.M{"_id": idCustom} , 
-									mongo.M{"_id": idCustom ,"fk_id": oid, "shopId": shopId, "op" : "i" })
-								if errUpsert3 != nil {
-									log.Fatal("colOffersByShop i upsert error: ",errUpsert3, " shard ", shardOrSelf["shardId"])						
-								}
-							} else {
-								log.Printf(" map[o][shopId] - empty\n")																		
-							}						
-
-
-						}
-					} else {
-						log.Printf(" m[\"op\"] - no operation type \n")
-					}
-
-
-				} else {
-					log.Printf(" m[\"o\"] No object map (delete op) \n")
-				}
-
-
-				
-				// we have to sync the damn insert
-				// because all tail threads use oplogsubscription
-				// via the SAME mongo connection
-//				cntTail,ok := (<- cht)
-//				if ok {
-					errInsert := oplogSubscription.Insert(mongo.M{"ts": operationTimeStamp ,
-						  "operation": m["op"], 
-						  "oid" : oid ,
-						  "ns" :  ns,
-						  "im" :  innerMap,
-					})
-					if errInsert != nil {
-						if errInsert.Error() == "mongo: unknown response opcode -268435456"  ||   errInsert.Error() == "mongo: cursor has no more results"{
-							fmt.Println("oplog journal entry failed with 'opcode -268435456' or no more results - possible threads use the SAME connection")
+									log.Printf(" map[o][lastUpdated] - empty\n")																		
+								}						
+	
+								shopId, ok = moo["shopId"].(int)
+								if ok {
+									idCustom :=  fmt.Sprint(shopId, "::" , oid, "::", shardOrSelf["ipAddress"])
+									errUpsert3 := colOffersByShop.Upsert( 
+										mongo.M{"_id": idCustom} , 
+										mongo.M{"_id": idCustom ,"fk_id": oid, "shopId": shopId, "op" : "i" })
+									checkWriteBack( "OffersByShop i upsert", errUpsert3,  shardOrSelf["shardId"])
+								} else {
+									log.Printf(" map[o][shopId] - empty\n")																		
+								}						
+	
+	
+							}
 						} else {
-							log.Fatal(" oplog journal insert error: ",errInsert)						
+							log.Printf(" m[\"op\"] - no operation type \n")
 						}
+	
+	
 					} else {
-						//fmt.Println(" successful oplog journal entry")
+						log.Printf(" m[\"o\"] No object map (delete op) \n")
 					}
-//					cht  <- cntTail
-//				} else {
-//					print(" 1 cht is closed\n")
-//				}						
-
+				}
+			
+/*				
+				errInsert := oplogSubscription.Insert(mongo.M{"ts": operationTimeStamp ,
+					  "operation": m["op"], 
+					  "oid" : oid ,
+					  "ns" :  ns,
+					  "im" :  innerMap,
+				})
+				if errInsert != nil {
+					if errInsert.Error() == "mongo: unknown response opcode -268435456"  ||   errInsert.Error() == "mongo: cursor has no more results"{
+						fmt.Println("oplog journal entry failed with 'opcode -268435456' or no more results - possible threads use the SAME connection")
+					} else {
+						log.Fatal(" oplog journal insert error: ",errInsert)						
+					}
+				} else {
+					//fmt.Println(" successful oplog journal entry")
+				}
+*/
 				printMap(m,true,"   ")
 
 
 				var errCounter error = nil
 				if insertCountIntoCollection {
 					errCounter = oplogSubscriptionCounter.Update( mongo.M{"counter": mongo.M{"$exists": true}, } , mongo.M{"$inc"   : mongo.M{"counter": 1} },)	
-				}
-				if errCounter != nil {
-					log.Fatal("lf12 ",errCounter)
+					if errCounter != nil {
+						log.Fatal("lf12 ",errCounter)
+					}
 				}
 
 
@@ -1373,18 +1405,16 @@ func startTimerLog(){
 	// http://digital.ni.com/public.nsf/allkb/A98D197224CB83B486256BC100765C4B
 
 
-	timeStart := time.Now()
+	//timeStart := time.Now()
 	//log.Print( timeStart.Format( layout3 ) )
 	ctick := time.Tick(intervalTimer * time.Millisecond)
 
 	i := int64(0)
 
 
-
-
 	go func() { 
-		for now := range ctick {
-
+		//for now := range ctick {
+		for _ = range ctick {
 
 			// header every x secs
 			if i % 40 == 0 {
@@ -1398,8 +1428,10 @@ func startTimerLog(){
 			//csvRecord["time"] = time.Now().Unix()
 
 			fmt.Print("\n")
-			writeLoadReadUpdateInfo()
-			writeTailInfo(now,timeStart, float64(intervalTimer))
+			
+			freqPerSec := 1000 / float64(intervalTimer) 
+			writeLoadReadUpdateInfo( freqPerSec )
+			writeTailInfo(freqPerSec )
 
 
 			// collection size and oplog lag every y secs
@@ -1442,7 +1474,7 @@ func startTimerLog(){
 
 
 
-func writeLoadReadUpdateInfo() {
+func writeLoadReadUpdateInfo( freqPerSec float64 ) {
 	
 		ARR_READ_CUR, ok := (<- chr)
 		if ok {
@@ -1452,8 +1484,11 @@ func writeLoadReadUpdateInfo() {
 				ARR_READ_TOT[k] += int64(v)
 			}
 			sum *= readBatchSize
-			fmt.Printf("%10v",sum)			
-			csvRecord["Reads per Sec * 1000"] = sum / 1000
+
+			perSec := float64(sum) * freqPerSec
+			perSec  = math.Trunc( 10* perSec) / 10
+			fmt.Printf("%10v",perSec)			
+			csvRecord["Reads per Sec * 1000"] = int64(perSec  / 1000)
 			arrReadCurNew := make( []int64, len(ARR_READ_CUR) )
 			chr <- arrReadCurNew
 	
@@ -1470,8 +1505,10 @@ func writeLoadReadUpdateInfo() {
 				sum += int64(v)
 				ARR_LOAD_TOT[k] += int64(v)
 			}
-			fmt.Printf("%10v",sum)			
-			csvRecord["Inserts per Sec * 10"] = sum / 10
+			perSec := float64(sum) * freqPerSec
+			perSec  = math.Trunc( 10* perSec) / 10
+			fmt.Printf("%10v",perSec)			
+			csvRecord["Inserts per Sec * 10"] = int64(perSec / 10) 
 			arrLoadCurNew := make( []int64, len(ARR_LOAD_CUR) )
 			chl <- arrLoadCurNew
 	
@@ -1487,9 +1524,10 @@ func writeLoadReadUpdateInfo() {
 				sum += int64(v)
 				ARR_UPDATE_TOT[k] += int64(v)
 			}
-			//sum *= updateBatchSize
-			fmt.Printf("%10v",sum)			
-			csvRecord["Updates per Sec * 10"] = sum / 10
+			perSec := float64(sum) * freqPerSec
+			perSec  = math.Trunc( 10* perSec) / 10
+			fmt.Printf("%10v",perSec)			
+			csvRecord["Updates per Sec * 10"] = int64(perSec/10) 
 			arrUpdateCurNew := make( []int64, len(ARR_UPDATE_CUR) )
 			chu <- arrUpdateCurNew
 	
@@ -1500,30 +1538,23 @@ func writeLoadReadUpdateInfo() {
 }
 
 
-func writeTailInfo(now time.Time, timeStart time.Time, intervalTimer float64){
+func writeTailInfo( freqPerSec float64){
 
-		cntTail,_ := (<- cht) 
-		cht <- 0
-		
-		//strSeconds := fmt.Sprint( now.Sub(timeStart).Seconds() )
+		cntTail,ok := (<- cht) 
 
-		tailTotal += cntTail
-
-		perSec := float64(cntTail) * intervalTimer / 1000
-		perSec  = math.Trunc( 10* perSec) / 10
-		
-		/*
-		if perSec < 1 {
-			fmt.Print( "|" )							
-		} else {
-			//fmt.Printf( " -%v %v- ",perSec,cntTail )			
-			fmt.Printf( "t%v ",perSec )			
-		}
-		*/
-		fmt.Printf( "%10v",perSec )			
-		csvRecord["Tails per Sec * 10"] = int64(perSec) / 10
-		
+		if ok {
+			tailTotal += cntTail
 	
+			perSec := float64(cntTail) * freqPerSec
+			perSec  = math.Trunc( 10* perSec) / 10
+			//fmt.Print(" ", perSec," ", cntTail, " ", freqPerSec)
+			fmt.Printf( "%10v",perSec )			
+			csvRecord["Tails per Sec * 10"] = int64(perSec/ 10) 
+	
+		} else {
+			log.Fatal("error reading from cht")
+		}
+		cht <- 0
 	
 }
 
@@ -1531,7 +1562,6 @@ func writeTailInfo(now time.Time, timeStart time.Time, intervalTimer float64){
 
 
 func incTailCounter(){
-	
 		cntTail,ok := (<- cht)
 		if ok {
 			cntTail++
@@ -1560,7 +1590,7 @@ func incReadCounter(i int64, idxThread int32){
 	
 }
 
-func incLoadCounter(i int64, idxThread int32){
+func incInsertCounter(i int64, idxThread int32){
 	
 		const chunkSize = 100
 		if (i+1) % chunkSize == 0 {
@@ -1749,7 +1779,7 @@ func loadInsert(idxThread int32 , batchStamp int64){
 		}
 		log.Print( fctfuncRecurseMsg() )
 
-		incLoadCounter(i,idxThread)
+		incInsertCounter(i,idxThread)
 		_,_ =  tailCursorLogInc( time.Now().Unix() ,0)	
 		
 	}
@@ -1861,7 +1891,7 @@ func loadUpdate(idxThread int32 ) {
 		i++
 		imax := int64( 10 * 1000 * 1000 * updateBatchSize  )			// make sure to loop our dataset at least two times
 		if i > imax {
-			//log.Println( fmt.Sprint(" more than ",imax," iterations. LoopUpdate over.") )		
+			//log.Println( fmt. (" more than ",imax," iterations. LoopUpdate over.") )		
 			break	
 		}
 		//fmt.Print( fmt.Sprint(" -u",i) )		
@@ -1906,12 +1936,11 @@ func loadUpdate(idxThread int32 ) {
 		 			mongo.M{  "$inc": mongo.M{"lastSeen": -1, "countUpdates": 1} ,
 		 		 	"$set": mongo.M{"lastUpdated": now1 }  }  )
 
-			if errUpd != nil {
-				log.Fatal(  fmt.Sprint( "mongo read4Update update error: ", errUpd,"\n") )		
-			}
+			checkWriteBack( "mongo read4Update update", errUpd,  fmt.Sprint( "update thread ", idxThread ) )
+			
 			
 			log.Print( fctfuncRecurseMsg() )
-			incUpdateCounter(updateBatchSize*i + j,idxThread)
+			incUpdateCounter( updateBatchSize*i + j,idxThread )
 			_,_ =  tailCursorLogInc( time.Now().Unix() ,0)
 
 
@@ -2272,8 +2301,9 @@ func loadConfig() error {
 		return err
 	} else {
 		fmt.Println("connect to ",CFG.Main.Host,":",CFG.Main.Port)
-		return nil	
 	}
+
+	return nil	
 	
 }
 
@@ -2300,5 +2330,21 @@ func getOidFromMap( mp  interface{}  ) ( mongo.ObjectId ) {
 
 
 	return oid
+	
+}
+
+func checkWriteBack( mark string , err error, shardName string){
+
+	if err != nil {
+		errMsg := err.Error()
+	
+		if strings.Contains(errMsg, writebackErr)  {
+			//log.Print(" -no local db on shard - no oplog size")
+			fmt.Print(" ", mark , " error: ",err, " skipping, shard:", shardName)			
+		} else {
+			debug.PrintStack()
+			log.Fatal(mark,err," shard:", shardName)			
+		}				
+	}
 	
 }

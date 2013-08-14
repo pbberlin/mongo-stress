@@ -70,3 +70,5 @@ ps -A | grep mongod
 
 
 echo ~/mongo/program/bin/mongo --shell --port 27001 ~/mongo/program/bin/start.js
+
+cd /home/peter.buchmann/ws_go/src/github.com/pbberlin/g1/mongostress

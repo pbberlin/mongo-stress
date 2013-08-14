@@ -17,9 +17,22 @@
 	line-height: 240%
 '>
 	<a href='#'  onclick='javascript:cmdStart();return false;' accesskey='s' ><u>S</u>tart Load</a><br>
-	<a href='#'  onclick='javascript:cmChartingToggle() ;return false;' accesskey='c' >Start/Stop <u>C</u>harting</u></a><br>
+	<a href='#'  onclick='javascript:cmdChartingToggle() ;return false;' accesskey='c' >Start/Stop <u>C</u>harting</u></a><br>
+	<br>
+	<a href='#'  onclick='javascript:cmdStop() ;return false;' accesskey='p' >Sto<u>p</u> Server App Loading</a><br>
+	<br>
+	<a href='#'  onclick='javascript:cmdSecondaryIndize() ;return false;' accesskey='' >Write Secondary Indize</a>&nbsp; 
+	<input 
+		type='text' 
+		id='inpUpdateSecondaryIndize'
+		name='inpUpdateSecondaryIndize'
+		style='width:20px' 
+		placeholder=''
+		disabled='disabled'
+	/>
 
-	<br><a href='#'  onclick='javascript:cmdStop() ;return false;' accesskey='p' >Sto<u>p</u> Server App Loading</a><br>
+	
+	<br>
 </div>
 
 <div id='navi'  style='display:block; 
@@ -108,7 +121,7 @@
 			value='2'
 			min=0 max=12 maxlength=2 
 			pattern="[0-9]+"
-			size=2  style='width:20px' autofocus='autofocus' 
+			size=2  style='width:20px' 
 			placeholder='Anzahl Load Threads'
 			disabled='disabled'
 		/>
@@ -126,12 +139,15 @@
 			value='2'
 			min=0 max=12 maxlength=2 
 			pattern="[0-9]+"
-			size=2  style='width:20px' autofocus='autofocus' 
+			size=2  style='width:20px' 
 			placeholder='Anzahl Update Threads'
 			disabled='disabled'
 		/>
 	<a href='#'  onclick='javascript:changeThreadNumber(this,1,"Update");return false;' accesskey='' > > </a><br>
 	</form>
+
+
+
 
 
 </div>
@@ -238,18 +254,30 @@
 				url: '/stop/someid',
 				cache: false
 			})
-			cmChartingToggle();
+			cmdChartingToggle();
 		}
 
-		function cmChartingToggle(){ 
+		function cmdChartingToggle(){ 
 			//clearInterval(timer_id_chartupdate);
 			pauseCharting = ! pauseCharting;
 		}
 
 
+		function cmdSecondaryIndize(){ 
+			$.ajax({
+				url: '/toggleSecondaryIndize/doesntmatter',
+				cache: false
+			})
+			getConfigInfo()
+		}
+
+
+
+
 		function getPerformanceData(){ 
 			if( pauseCharting ) return;
 			cntrGotPerformanceCur++;
+			if( cntrGotPerformanceCur % 10 == 0 ) getConfigInfo();			
 			if( js_dry_run ) return;
 			$.ajax({
 				url: '/data/?hostname=r900&',
@@ -267,9 +295,9 @@
 			});
 		}
 
-		function getThreadCounts(){
+		function getConfigInfo(){
 			$.ajax({
-				url: '/getThreadCounts/bla',
+				url: '/getConfigInfo/bla',
 				cache: false
 			}).done(function( argJsonMap ) {
 				var keyVal = ""
@@ -286,7 +314,7 @@
 		jQuery(document).ready(function($) {
 
 
-			getThreadCounts();
+			getConfigInfo();
 			getPerformanceData();
 			timer_id_dataload   = setInterval('getPerformanceData()',1000);
 
