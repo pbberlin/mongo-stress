@@ -12,7 +12,13 @@ as describe at the bottom of this document:
 
 It is also a Mongo Load Tester
 	
-It Tests Inserts, Reads, 
+
+
+Todo
+	tailCursorLogInc( ... ,newTimeOplog )
+		=> make an array of shards for each newTimeOplog-Datum
+		=> compute the average newTimeOplog across all shards
+		=> update the damn thing only every 100 call
 
 
 
@@ -41,6 +47,8 @@ import (
  	"flag"
  	"runtime/pprof"
  	"runtime/debug"
+	"crypto/md5" 	
+	"io"
 )
 
 
@@ -1335,20 +1343,15 @@ func iterateTailCursor( shardOrSelf map[string]string ){
 
 */
 
+				printMap(m       ,true ,"   ")
+				printMap(innerMap,false,"   ")
 
-
-				printMap(m,true,"   ")
 
 			} else {
 				fmt.Print( fctfuncRecurseMsg() )
 			}
 
 			incTailCounter()
-
-			if innerMap != nil { 
-				printMap(innerMap,true,"	  inner map: ") 
-			}
-
 
 		}
 
@@ -1656,10 +1659,10 @@ func incUpdateCounter(i int64, idxThread int32){
 }
 
 
-func tailCursorLogInc(newInsertSaveTime,newTimeOplog int64) (x,y int64) {
+func tailCursorLogInc(newInsertUpdateSaveTime,newTimeOplog int64) (x,y int64) {
 	
-		if  newInsertSaveTime > 1 {
-		  atomic.StoreInt64( &timeLastSaveOperation, newInsertSaveTime, )
+		if  newInsertUpdateSaveTime > 1 {
+		  atomic.StoreInt64( &timeLastSaveOperation, newInsertUpdateSaveTime, )
 		}
 
 		if  newTimeOplog > 1   {
@@ -1789,6 +1792,8 @@ func loadInsert(idxThread int32 , batchStamp int64){
 	conn := getConn()
 	defer conn.Close()
 	colOffers := getMainDBCollection( conn, CFG.Main.DatabaseName, offers  )
+	h := md5.New()
+
 	
 	for i:=batchStamp ; i < batchStamp+insertsPerThread; i++ {
 		
@@ -1802,7 +1807,15 @@ func loadInsert(idxThread int32 , batchStamp int64){
 			default: shopId = shopRnd
 		}
 		
+		//io.WriteString(h, "The fog is getting thicker!")
+		io.WriteString( h, fmt.Sprint( i , "The fog is getting thicker!") )
+		hashedId := fmt.Sprintf( "%x", h.Sum(nil) )
+		//fmt.Print(" ", hashedId)
+
+		
+		
 		err := colOffers.Insert(mongo.M{"offerId": i,
+				"_id" : hashedId,
 			 "shopId"	       : shopId, 
 			 "categoryId"    : 15,
 			 "lastSeen"      : int32(time.Now().Unix()) ,
