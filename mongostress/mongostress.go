@@ -55,9 +55,9 @@ const secondsDeferTailCursor = 1		// after sleep - set back additional x seconds
 
 
 var LOADER_COUNTER  = int32(0)
-var LOADERS_CONC_MAX=	int32(0)
-var ARR_LOAD_TOT = make( []int64 ,LOADERS_CONC_MAX )
-var ARR_LOAD_CUR = make( []int64, LOADERS_CONC_MAX )
+var INSERTERS_CONC_MAX=	int32(0)
+var ARR_INSERT_TOT = make( []int64 ,INSERTERS_CONC_MAX )
+var ARR_INSERT_CUR = make( []int64, INSERTERS_CONC_MAX )
 var chl chan []int64 = make(chan []int64 ,1)      // sync channel load
 
 
@@ -90,10 +90,9 @@ var changelogFullPath string
 const shardErr = "can't use 'local' database through mongos"
 const writebackErr = "writeback waitfor for older id"
 
-var checkMainDb  bool = true
-var checkAdminDb bool = true
 
-var checkLocalDb bool = true
+
+
 var 	oplogAccessible bool = true
 
 
@@ -102,7 +101,7 @@ var 	oplogAccessible bool = true
 var   mongoSecsEarlier mongo.Timestamp = mongo.Timestamp(5898548092499667758)	// limit timestamp
 
 var outputLevel int = 0
-const insertCountIntoCollection bool = false
+
 
 const readBatchSize  = 100
 const updateBatchSize= 100
@@ -125,7 +124,6 @@ const sizeLagReport = 4
 var lv []int64 = make( []int64, sizeLagReport )
 
 
-var freeMem int64 = 0
 
 
 var csvRecord map[string]int64 = make(map[string]int64)
@@ -156,11 +154,9 @@ var SHARDS map[string]map[string]string  = make( map[string]map[string]string )
 
 var cpuprofile = flag.String("cpuprofile", "", "write cpu profile to file")
 
-
 var updateSecondaryIndize int32 = 0
 
 
-var xx1 int32 = 0
 
 func main() {
 
@@ -185,24 +181,8 @@ func main() {
 	changelogFullPath = fmt.Sprint( CFG.Main.DatabaseName , "." , changelogCol )
 	nsToTrack = fmt.Sprint( CFG.Main.DatabaseName , "." , offers )	
 	
-	/*
-	freeMemTmp, err := OsFreeMemMB()
-	if err == nil {
-		freeMem = freeMemTmp
-		fmt.Println( "Hardware Memory is ", freeMem, " MB" )	
-	} else {
-		log.Fatal(err)
-	}
-	*/
-	freeMem = 96 * 1000
 	
 	
-	resident, virtual, err := getServerStatsMemory(true)
-	if err == nil {
-		fmt.Printf("phys. Memory is %v - of data stock size of %v (useful only on mongod)\n",resident, virtual)
-	} else {
-		fmt.Println("no mem info", err )
-	}
 
 	
 	printHelperCommands()
@@ -305,7 +285,7 @@ func elseHandler(w http.ResponseWriter, r *http.Request) {
 
 
 func stopHandler(w http.ResponseWriter, r *http.Request) {
-  	p2( w, "received quit signal by browser: %v", 1)
+  	p2( w, "\nreceived quit signal by browser: %v", 1)
   	Flush1(w)
 
 		log.Println(" sending quit signal: ", 1)
@@ -327,37 +307,37 @@ func changeLoadThreads(w http.ResponseWriter, r *http.Request, dummy string) {
   	p2( w, "could not parse '%v'- no change<br>\n", params)
 	} else {
 
-  	p2( w, "changeLoadThreads switched from %v to %v \n", LOADERS_CONC_MAX, newLoadersConcMax)
+  	p2( w, "changeLoadThreads switched from %v to %v \n", INSERTERS_CONC_MAX, newLoadersConcMax)
 
 		// loading not started yet
 		if !singleInstanceRunning {
 	  	p2( w, "<br>changing load threads while not running \n" )
-			LOADERS_CONC_MAX=	int32(newLoadersConcMax)
-			ARR_LOAD_TOT = make( []int64 , newLoadersConcMax )
-			ARR_LOAD_CUR = make( []int64 , newLoadersConcMax )
+			INSERTERS_CONC_MAX=	int32(newLoadersConcMax)
+			ARR_INSERT_TOT = make( []int64 , newLoadersConcMax )
+			ARR_INSERT_CUR = make( []int64 , newLoadersConcMax )
 			return
 		}
 
 		// loading already started - carefully intervene by blocking the channel
-		if( int32(newLoadersConcMax) > LOADERS_CONC_MAX ){
-			ARR_LOAD_CUR, ok := (<- chl)
-	  	//p2( w, "cur len %v \n", len(ARR_LOAD_CUR) )
+		if( int32(newLoadersConcMax) > INSERTERS_CONC_MAX ){
+			ARR_INSERT_CUR, ok := (<- chl)
+	  	//p2( w, "cur len %v \n", len(ARR_INSERT_CUR) )
 			if ok {
-				ARR_LOAD_TOT = make( []int64 , newLoadersConcMax )
+				ARR_INSERT_TOT = make( []int64 , newLoadersConcMax )
 				tmp := make( []int64 , newLoadersConcMax )
-				copy(tmp,ARR_LOAD_CUR)
-				ARR_LOAD_CUR = tmp
+				copy(tmp,ARR_INSERT_CUR)
+				ARR_INSERT_CUR = tmp
 			} else {
 				log.Fatal("error reading from chl 4")
 			}
-	  	//p2( w, "new len %v \n", len(ARR_LOAD_CUR) )
-			LOADERS_CONC_MAX=	int32(newLoadersConcMax)
-			chl <- ARR_LOAD_CUR				
+	  	//p2( w, "new len %v \n", len(ARR_INSERT_CUR) )
+			INSERTERS_CONC_MAX=	int32(newLoadersConcMax)
+			chl <- ARR_INSERT_CUR				
 			
 		} else {
-			ARR_LOAD_CUR, _ := (<- chl)
-			LOADERS_CONC_MAX=	int32(newLoadersConcMax)
-			chl <- ARR_LOAD_CUR				
+			ARR_INSERT_CUR, _ := (<- chl)
+			INSERTERS_CONC_MAX=	int32(newLoadersConcMax)
+			chl <- ARR_INSERT_CUR				
 		}
 
 	}
@@ -482,7 +462,7 @@ func dataHandler(w http.ResponseWriter, r *http.Request) {
 func getConfigInfo(w http.ResponseWriter, r *http.Request, params string) {
 
 	var mapCounts map[string]int32 = make(map[string]int32)
-	mapCounts["inpLoadThreads"] = LOADERS_CONC_MAX
+	mapCounts["inpLoadThreads"] = INSERTERS_CONC_MAX
 	mapCounts["inpReadThreads"] = READERS_CONC_MAX
 	mapCounts["inpUpdateThreads"] = UPDATERS_CONC_MAX
 	mapCounts["inpUpdateSecondaryIndize"] = int32(updateSecondaryIndize)
@@ -541,18 +521,16 @@ func tplHandler(w http.ResponseWriter, r *http.Request, params string) {
 
 func startHandler(w http.ResponseWriter, r *http.Request, params string) {
 
-
-
 	c := map[string]string{
 		"Title":"Doing load",
 	  "Body" :  fmt.Sprintf("starting ... (%v)\n", params),
 	}
-	renderTemplatePrecompile( w ,"main_header", c )	
 	
 	if( singleInstanceRunning ){
 		c = map[string]string{
 		  "Body" : fmt.Sprintf("already running ... (%v)\n", params),
 		}
+		renderTemplatePrecompile( w ,"main_header", c )		
 		renderTemplatePrecompile( w ,"main_body"  , c )	
 		renderTemplatePrecompile( w ,"main_footer", c )	
 		fmt.Println("already one instance running")
@@ -564,6 +542,8 @@ func startHandler(w http.ResponseWriter, r *http.Request, params string) {
 
 	conn := getConn()
 	time.Sleep( 100 * time.Millisecond )
+	checkAccessAndShardConfig(conn)
+	setupAndInitDestinationCollections(conn)
 	conn.Close()
 
 
@@ -595,7 +575,7 @@ func startHandler(w http.ResponseWriter, r *http.Request, params string) {
 
 
 	// no throwing the "syncing" balls onto the field:
-	chl <- ARR_LOAD_CUR
+	chl <- ARR_INSERT_CUR
 
 	chr <- ARR_READ_CUR
 
@@ -616,15 +596,17 @@ func startHandler(w http.ResponseWriter, r *http.Request, params string) {
 	tsFinish := time.Now().Unix()
 	elapsed  := (tsFinish-tsStart)
 	log.Println("tsFinish: ",tsFinish, " Dauer: " , elapsed )
-	loadTotal,readTotal,updateTotal :=  finalReport()
-	var percentage float64 = float64(tailTotal)/float64(loadTotal)
+	readTotal, insertTotal,updateTotal :=  finalReport()
+	var percentage float64 = float64(tailTotal)/float64(insertTotal+updateTotal)
 	percentage = math.Trunc(percentage*1000)/10
 	readPerSec   :=  int64(   math.Trunc(float64(readTotal)  /float64(elapsed))   )
-	updatePerSec :=  int64(   math.Trunc(float64(updateTotal)/float64(elapsed))   )
+	insertUpdatePerSec :=  int64(   math.Trunc(float64(insertTotal+updateTotal)/float64(elapsed))   )
 	c["Body"] = "==================================================<br>\n"
-	c["Body"] = fmt.Sprintf( "Read/s-Loaded-Tailed: %8v - %8v - %v - %v - %v%%", readPerSec,updatePerSec,loadTotal,tailTotal,percentage ) 
-	renderTemplatePrecompile( w ,"main_body", c )	
-	renderTemplatePrecompile( w ,"main_footer", c )	
+	c["Body1"] = fmt.Sprintf( "readpersec %8v - insert+updatepersec %8v \n"  , readPerSec,insertUpdatePerSec) 
+	c["Body2"] = fmt.Sprintf( "total insertupate %v tailed %v -percent %v\n", insertTotal+updateTotal,tailTotal,percentage) 
+
+	p2( w, c["Body1"] )
+	p2( w, c["Body2"] )
 
 	singleInstanceRunning = false
 
@@ -637,7 +619,7 @@ func spawnInserts(){
 	for {
 		
 		lc := atomic.LoadInt32( &LOADER_COUNTER )
-		if lc > LOADERS_CONC_MAX-1 {
+		if lc > INSERTERS_CONC_MAX-1 {
 			time.Sleep( 500 * time.Millisecond )
 			continue
 		}
@@ -697,7 +679,7 @@ func spawnUpdates(){
 
 
 
-func x1___mongo_access_stuff__(){}
+func x1___mongo_access________(){}
 
 
 func getConn() mongo.Conn {
@@ -706,121 +688,127 @@ func getConn() mongo.Conn {
 	if err != nil {
 		log.Fatal("getConn1 failed", err)
 	}
-
-
-	if checkMainDb {
-		success := checkDbAccess(conn,CFG.Main.DatabaseName,CFG.Main.DbUsername, CFG.Main.DbPassword)
-		if ! success {
-			log.Fatal("no access to main database.")
-		}
-		checkMainDb = false
-	}
-
-
-
-	if checkAdminDb {
-		success := checkDbAccess(conn,"admin",CFG.Main.DbAdminUsername, CFG.Main.DbAdminPassword)
-		if ! success {
-			fmt.Println("no access to admin database.")
-		}
-		checkAdminDb = false
-	}
-
-
-	if checkLocalDb {
-		oplogAccessible = checkDbAccess(conn,"local",CFG.Main.DbUsername, CFG.Main.DbPassword)
-		
-		if ! oplogAccessible {
-
-			var m mongo.M
-			dbAdmin   := mongo.Database{conn, "admin", mongo.DefaultLastErrorCmd}	
-		  errAccess := dbAdmin.Run(mongo.D{{"listShards", 1}}, &m)	
-			if errAccess != nil {
-				log.Println("listing of shards", errAccess )
-			} else {
-				aShards, isArray :=  m["shards"].(  []interface{} )
-				//fmt.Printf("\n%#v\n",m["shards"])
-				if isArray {
-					for _,v := range aShards {
-						//fmt.Printf("key: %v - %#v\n",k,v)
-						mShard, isMap :=  v.(  map[string]interface{} )
-						if isMap  {
-							/*
-							for k1,v1 := range mShard {
-								fmt.Printf("key: %#v - %#v\n",k1,v1)
-							}
-							*/
-							shardId, ok1 := mShard["_id"].(string)
-							hostString, ok2 := mShard["host"].(string)
-							rsName := ""
-							ipAddress  := ""
-							portNumber := ""
-							if ok1 && ok2 {
-								//fmt.Printf("shardId: %#v - hostString: %#v\n",shardId,hostString)	
-								aHost := strings.Split(hostString, "/")
-								//fmt.Printf("%#v \n",aHost)
-								rsName     = aHost[0]
-								
-								rsMembers := aHost[1]
-								firstMember := strings.Split(rsMembers, ",")
-
-								
-								aAddressPlusPort := strings.Split(firstMember[0], ":")
-								ipAddress  = aAddressPlusPort[0]
-								if len(ipAddress) > 1 {
-									portNumber  = aAddressPlusPort[1]	
-								}
-								
-								mainKey := fmt.Sprint( shardId, " :: ", rsName, " :: ",ipAddress," :: ", portNumber)	
-								fmt.Println(mainKey)	
-								var tmpMap map[string]string = make( map[string]string )
-								tmpMap["shardId"]   = shardId
-								tmpMap["rsName"]    = rsName
-								tmpMap["ipAddress"]  = ipAddress
-								tmpMap["portNumber"] = portNumber
-								SHARDS[mainKey] = tmpMap
-								
-							} else {
-								fmt.Println(" mShard[\"_id\"] or mShard[\"host\"] not parseable")							
-							}
-							
-						} else {
-							fmt.Println("conversion of shard map failed")	
-						}
-					}
-				} else {
-					fmt.Println("conversion of array of shards failed")	
-				}
-			}
-
-			//fmt.Printf("%#v\n", SHARDS)	
-			
-			if len(SHARDS) > 0 {
-				oplogAccessible = true	
-			}
-			
-		} else {
-
-			mainKey := fmt.Sprint( "no_shards", "::", "rs_nomatterwhat", "::",CFG.Main.Host,"::", CFG.Main.Port)	
-			//fmt.Println(mainKey)	
-			var tmpMap map[string]string = make( map[string]string )
-			tmpMap["shardId"]   = "no_shards"
-			tmpMap["rsName"]    = "rs_nomatterwhat"
-			tmpMap["ipAddress"]  = CFG.Main.Host
-			tmpMap["portNumber"] = CFG.Main.Port
-			SHARDS[mainKey] = tmpMap
-
-			
-		}
-		
-		checkLocalDb = false
-	}
-
 	return conn
 
 }
 
 
+func checkAccessAndShardConfig(conn mongo.Conn) {
+
+	var success bool
+
+	success = checkDbAccess(conn,CFG.Main.DatabaseName,CFG.Main.DbUsername, CFG.Main.DbPassword)
+	if ! success {
+		log.Fatal("no access to main database.")
+	}
+
+
+
+	success = checkDbAccess(conn,"admin",CFG.Main.DbAdminUsername, CFG.Main.DbAdminPassword)
+	if ! success {
+		log.Fatal("no access to admin database.")
+	}
+
+
+
+	oplogAccessible = checkDbAccess(conn,"local",CFG.Main.DbUsername, CFG.Main.DbPassword)
+	if ! oplogAccessible {
+		var m mongo.M
+		dbAdmin   := mongo.Database{conn, "admin", mongo.DefaultLastErrorCmd}	
+	  errAccess := dbAdmin.Run(mongo.D{{"listShards", 1}}, &m)	
+		if errAccess != nil {
+			log.Println("listing of shards", errAccess )
+		} else {
+			aShards, isArray :=  m["shards"].(  []interface{} )
+			//fmt.Printf("\n%#v\n",m["shards"])
+			if isArray {
+				for _,v := range aShards {
+					//fmt.Printf("key: %v - %#v\n",k,v)
+					mShard, isMap :=  v.(  map[string]interface{} )
+					if isMap  {
+						/*
+						for k1,v1 := range mShard {
+							fmt.Printf("key: %#v - %#v\n",k1,v1)
+						}
+						*/
+						shardId, ok1 := mShard["_id"].(string)
+						hostString, ok2 := mShard["host"].(string)
+						rsName := ""
+						ipAddress  := ""
+						portNumber := ""
+						if ok1 && ok2 {
+							//fmt.Printf("shardId: %#v - hostString: %#v\n",shardId,hostString)	
+							aHost := strings.Split(hostString, "/")
+							//fmt.Printf("%#v \n",aHost)
+							rsName     = aHost[0]
+							
+							rsMembers := aHost[1]
+							firstMember := strings.Split(rsMembers, ",")
+
+							
+							aAddressPlusPort := strings.Split(firstMember[0], ":")
+							ipAddress  = aAddressPlusPort[0]
+							if len(ipAddress) > 1 {
+								portNumber  = aAddressPlusPort[1]	
+							}
+							
+							mainKey := fmt.Sprint( shardId, " :: ", rsName, " :: ",ipAddress," :: ", portNumber)	
+							//fmt.Println(mainKey)	
+							var tmpMap map[string]string = make( map[string]string )
+							tmpMap["shardId"]   = shardId
+							tmpMap["rsName"]    = rsName
+							tmpMap["ipAddress"]  = ipAddress
+							tmpMap["portNumber"] = portNumber
+							SHARDS[mainKey] = tmpMap
+							
+						} else {
+							fmt.Println(" mShard[\"_id\"] or mShard[\"host\"] not parseable")							
+						}
+						
+					} else {
+						fmt.Println("conversion of shard map failed")	
+					}
+				}
+			} else {
+				fmt.Println("conversion of array of shards failed")	
+			}
+		}
+
+		
+		if len(SHARDS) > 0 {
+			oplogAccessible = true	
+		}
+		
+	} else {
+
+		mainKey := fmt.Sprint( "no_shards", "::", "rs_nomatterwhat", "::",CFG.Main.Host,"::", CFG.Main.Port)	
+		//fmt.Println(mainKey)	
+		var tmpMap map[string]string = make( map[string]string )
+		tmpMap["shardId"]   = "no_shards"
+		tmpMap["rsName"]    = "i_am_primary"
+		tmpMap["ipAddress"]  = CFG.Main.Host
+		tmpMap["portNumber"] = CFG.Main.Port
+		SHARDS[mainKey] = tmpMap
+		
+	}
+	
+
+	fmt.Println("Shard config is")
+	for k,_ := range SHARDS {
+		fmt.Printf("\t%v\n", k)
+	}
+
+	
+
+}
+
+/*
+		checking the mere existence AND auth access
+		of the required mongo dbs
+		
+		without auth, we run a db.stats
+		with    auth, we simply take the db.Authenticate method as proof of existence and auth access
+*/
 func checkDbAccess( conn mongo.Conn, dbName string, username string, password string ) bool {
 	
 	db  := mongo.Database{conn, dbName , mongo.DefaultLastErrorCmd}	
@@ -828,7 +816,7 @@ func checkDbAccess( conn mongo.Conn, dbName string, username string, password st
 		errAuth := db.Authenticate(username, password) 
 		if errAuth != nil {
 			if errAuth.Error() == shardErr {
-				log.Println("db ",dbName, " not available via shard ", errAuth )
+				fmt.Println("db ",dbName, " not available via shard ", errAuth )
 				return false
 			} else {
 				log.Println("auth for db",dbName, "failed for",username,"-", password, ":", errAuth )
@@ -851,11 +839,12 @@ func checkDbAccess( conn mongo.Conn, dbName string, username string, password st
 
 
 
-func getCollection(conn mongo.Conn, nameDb string, nameCol string  )(col mongo.Collection){
-	
-		tmpDb  := mongo.Database{conn, nameDb, mongo.DefaultLastErrorCmd}	// get a database object
-		col	= tmpDb.C(nameCol)  
-		return
+func getMainDBCollection(conn mongo.Conn, nameDb string, nameCol string  )(col mongo.Collection){
+
+	tmpDb  := mongo.Database{conn, nameDb, mongo.DefaultLastErrorCmd}	// get a database object
+	authenticateMainDb(tmpDb)
+	col	= tmpDb.C(nameCol)  
+	return
 	
 }
 
@@ -886,10 +875,10 @@ func authenticateAdminDb( db mongo.Database){
 }
 
 
-func initDestinationCollections(conn mongo.Conn) (a,b,c,d mongo.Collection){
+func setupAndInitDestinationCollections(conn mongo.Conn) (a,b,c,d mongo.Collection){
 	
 	// create a capped collection if it is empty
-	colChangeLog        := getCollection( conn, CFG.Main.DatabaseName, changelogCol  )
+	colChangeLog        := getMainDBCollection( conn, CFG.Main.DatabaseName, changelogCol  )
 	n, _ := colChangeLog.Find(nil).Count()
 	if n>0  {
 		log.Println("capped oplog ",changelogFullPath,"already exists. Entries: ", n)
@@ -916,7 +905,7 @@ func initDestinationCollections(conn mongo.Conn) (a,b,c,d mongo.Collection){
 		}
 	}
 
-	colChangelogCounter := getCollection( conn, CFG.Main.DatabaseName, counterChangeLogCol)
+	colChangelogCounter := getMainDBCollection( conn, CFG.Main.DatabaseName, counterChangeLogCol)
 	errCounter := colChangelogCounter.Upsert( mongo.M{"counter": mongo.M{"$exists": true}, } , mongo.M{"counter": 0}  ,)
 	if errCounter != nil {
 		if errCounter.Error() == "isOk()" {
@@ -927,8 +916,8 @@ func initDestinationCollections(conn mongo.Conn) (a,b,c,d mongo.Collection){
 	}
 	
 	
-	colOffersByShop        := getCollection( conn, CFG.Main.DatabaseName, "offersByShop")
-	colOffersByLastUpdated := getCollection( conn, CFG.Main.DatabaseName, "offersByLastUpdated")
+	colOffersByShop        := getMainDBCollection( conn, CFG.Main.DatabaseName, "offersByShop")
+	colOffersByLastUpdated := getMainDBCollection( conn, CFG.Main.DatabaseName, "offersByLastUpdated")
 	// todo: if shards exists - then shard those collections...	
 	
 	
@@ -937,13 +926,14 @@ func initDestinationCollections(conn mongo.Conn) (a,b,c,d mongo.Collection){
 }
 
 
-func getColSizes(printDetails bool)(size1,size2 int64, err error){
+func sizesAndMemory(printDetails bool)(sizeWorkDb,sizeSumOplogs int64,  resident, virtual int, err error){
 
 	conn := getConn()
 	defer conn.Close()
 
 	var db mongo.Database
 	db = mongo.Database{conn, CFG.Main.DatabaseName, mongo.DefaultLastErrorCmd}
+	authenticateMainDb(db)
 	// 	err = db.Run(D{{"drop", collectionName}}, nil)
 	var m mongo.M
 	
@@ -967,9 +957,10 @@ func getColSizes(printDetails bool)(size1,size2 int64, err error){
 		}
 		tmpSize1,ok := m["storageSize"].(int)
 		if ok {
-			size1 = int64(tmpSize1)
+			sizeWorkDb = int64(tmpSize1)
 		}
 	}
+
 
 
 
@@ -984,6 +975,10 @@ func getColSizes(printDetails bool)(size1,size2 int64, err error){
 			}
 
 
+			// revolting trick - authenticate against admin db
+			// 	and after that you can access the local db
+			db = mongo.Database{lpConn, "admin", mongo.DefaultLastErrorCmd}
+			authenticateAdminDb(db)
 			db = mongo.Database{lpConn, "local", mongo.DefaultLastErrorCmd}
 			err = db.Run(mongo.D{{"collStats","oplog.rs" },{"scale",(1024*1024) }}, &m)
 			if err != nil {
@@ -994,9 +989,32 @@ func getColSizes(printDetails bool)(size1,size2 int64, err error){
 				}
 				tmpSize2,ok := m["storageSize"].(int)
 				if ok {
-					size2 += int64(tmpSize2)
+					sizeSumOplogs += int64(tmpSize2)
 				}
 			}
+
+			
+		  //err = db.Run(  mongo.D{{"dbStats"    , 1}}, &m)
+			  err = db.Run(  mongo.D{{"serverStatus",1}}, &m)
+			mapMem := make( map[string]interface{} )
+			var ok bool		
+			//db.runCommand({"serverStatus":1,"workingSet":1,"metrics":1,"locks":1,"repl":1,"indexCounters":1}) 			
+			if err != nil {
+				log.Fatal("runcommand serverStatus failed: ", err)
+			} else {
+				//printMap(m,false,"")
+				mapMem,ok = m["mem"].( map[string]interface{} )
+				if ok {
+					//printMap(mapMem,false,"")
+					resident += mapMem["resident"].(int)
+					virtual  += mapMem["virtual"].(int)
+					
+				} else {
+					fmt.Println("Server Status map did not contain a map 'mem' - no memory info")	
+				}
+			}
+
+			
 		}
 
 	}
@@ -1013,46 +1031,27 @@ func getColSizes(printDetails bool)(size1,size2 int64, err error){
 
 
 /*
-		memory infos for a mongos are relatively USELESS
+		Getting the memory infos of the mongod/mongos.
+		
+		Only useful if running without sharding on a mongod.
+		
+		Memory infos for a mongoS are relatively USELESS.
+		Instead - use the info of MMS 
+		
+		interestingly,  serverStatus is executable 
+			from app db
 
 */
-func getServerStatsMemory(printDetails bool)(resident int, virtual int, err error){
+func getServerStatsMemory(printDetails bool){
 
-	conn := getConn()
-	defer conn.Close()
-
-	var db mongo.Database
-	db = mongo.Database{conn, CFG.Main.DatabaseName, mongo.DefaultLastErrorCmd}
-
-	var m mongo.M
-	mapMem := make( map[string]interface{} )
-	var ok bool
-
-	//db.runCommand({"serverStatus":1,"workingSet":1,"metrics":1,"locks":1,"repl":1,"indexCounters":1}) 
-	
-
-  //err = db.Run(  mongo.D{{"dbStats"    , 1}}, &m)
-	  err = db.Run(  mongo.D{{"serverStatus",1}}, &m)
-
-	
-	if err != nil {
-		log.Fatal("runcommand serverStatus failed: ", err)
+	/*
+	resident, virtual, err := getServerStatsMemory(true)
+	if err == nil {
+		fmt.Printf("phys. Memory is %v - of data stock size of %v (useful only on mongod)\n",resident, virtual)
 	} else {
-		//printMap(m,false,"")
-		mapMem,ok = m["mem"].( map[string]interface{} )
-		if ok {
-			//printMap(mapMem,false,"")
-			resident = mapMem["resident"].(int)
-			virtual  = mapMem["virtual"].(int)
-			
-		} else {
-			fmt.Println("Server Status map did not contain a map 'mem' - no memory info")	
-		}
+		fmt.Println("no mem info", err )
 	}
-
-
-	return
-
+	*/
 	
 }
 
@@ -1151,7 +1150,7 @@ func getTailCursorHelper( oplog mongo.Collection ) mongo.Cursor  {
 		log.Fatal( fmt.Sprint( "mongo oplog find error: ", err,"\n") )
 	}
 
-	log.Println( " ... tailable cursor retrieved. Id ", cursor.GetId() )	
+	log.Println( "\t\t ... tailable cursor retrieved. Id ", cursor.GetId() )	
 	return cursor
 
 }
@@ -1161,12 +1160,16 @@ func getTailCursorHelper( oplog mongo.Collection ) mongo.Cursor  {
 
 
 func iterateTailCursor( shardOrSelf map[string]string ){
+	
 
 	conn := getConn()
 	defer conn.Close()
 
-	_, oplogSubscriptionCounter, colOffersByShop, colOffersByLastUpdated := initDestinationCollections(conn)
-	//oplogSubscription, oplogSubscriptionCounter, colOffersByShop, colOffersByLastUpdated := initDestinationCollections(conn)
+
+	//oplogSubscription        := getMainDBCollection( conn, CFG.Main.DatabaseName, changelogCol  )
+	//oplogSubscriptionCounter := getMainDBCollection( conn, CFG.Main.DatabaseName, counterChangeLogCol)
+	colOffersByShop          := getMainDBCollection( conn, CFG.Main.DatabaseName, "offersByShop")
+	colOffersByLastUpdated   := getMainDBCollection( conn, CFG.Main.DatabaseName, "offersByLastUpdated")
 
 
 	fctfuncRecurseMsg   := funcRecurseMsg("recursion ")
@@ -1177,6 +1180,7 @@ func iterateTailCursor( shardOrSelf map[string]string ){
 		fmt.Println("no tail cursor on shard system")	
 		return
 	}
+
 
 
 	for {
@@ -1319,8 +1323,6 @@ func iterateTailCursor( shardOrSelf map[string]string ){
 				} else {
 					//fmt.Println(" successful oplog journal entry")
 				}
-*/
-				printMap(m,true,"   ")
 
 
 				var errCounter error = nil
@@ -1331,6 +1333,11 @@ func iterateTailCursor( shardOrSelf map[string]string ){
 					}
 				}
 
+*/
+
+
+
+				printMap(m,true,"   ")
 
 			} else {
 				fmt.Print( fctfuncRecurseMsg() )
@@ -1466,22 +1473,23 @@ func startTimerLog(){
 				lastLag, lagTrail  :=  tailCursorLagReport()
 				fmt.Printf("%14v",lagTrail)		
 
-				s1, s2, err := getColSizes(false)
+				sizeWorkDb,sizeSumOplogs, resident, virtual , err := sizesAndMemory(false)
 				if err != nil {
 					if err.Error() == shardErr {
 						//log.Print(" -no local db on shard - no oplog size")				
 					} else {
-						fmt.Printf( "offers size: %v  oplog %v  - error: %v\n", s1, s2, err)	
+						fmt.Printf( "offers size: %v  oplog %v  - error: %v\n", sizeWorkDb, sizeSumOplogs, err)	
 					}				
 				}
-				fmt.Printf("%10v",s1)			
+				fmt.Printf("%10v",sizeWorkDb)			
+
+				csvRecord["Hot Set to SysRAM"] = 100*(sizeWorkDb + sizeSumOplogs) / int64(resident)
 
 				//csvRecord["Collection Size"] = s1
-				//csvRecord["System RAM"] = freeMem 
+				csvRecord["System RAM"] = int64( 100* resident / virtual)
 				
 				csvRecord["Lag of Tail Cursor"] = lastLag
 
-				csvRecord["Hot Set to SysRAM"] = int64(100*(s1 + s2))/freeMem
 				
 				
 
@@ -1524,18 +1532,18 @@ func writeLoadReadUpdateInfo( freqPerSec float64 ) {
 
 
 
-		ARR_LOAD_CUR, ok := (<- chl)
+		ARR_INSERT_CUR, ok := (<- chl)
 		if ok {
 			sum := int64(0)
-			for k,v := range ARR_LOAD_CUR {
+			for k,v := range ARR_INSERT_CUR {
 				sum += int64(v)
-				ARR_LOAD_TOT[k] += int64(v)
+				ARR_INSERT_TOT[k] += int64(v)
 			}
 			perSec := float64(sum) * freqPerSec
 			perSec  = math.Trunc( 10* perSec) / 10
 			fmt.Printf("%10v",perSec)			
 			csvRecord["Inserts per Sec * 10"] = int64(perSec / 10) 
-			arrLoadCurNew := make( []int64, len(ARR_LOAD_CUR) )
+			arrLoadCurNew := make( []int64, len(ARR_INSERT_CUR) )
 			chl <- arrLoadCurNew
 	
 		} else {
@@ -1620,10 +1628,10 @@ func incInsertCounter(i int64, idxThread int32){
 	
 		const chunkSize = 100
 		if (i+1) % chunkSize == 0 {
-			ARR_LOAD_CUR, ok := (<- chl)
+			ARR_INSERT_CUR, ok := (<- chl)
 			if ok {
-				ARR_LOAD_CUR[idxThread] += chunkSize
-				chl <- ARR_LOAD_CUR
+				ARR_INSERT_CUR[idxThread] += chunkSize
+				chl <- ARR_INSERT_CUR
 			} else {
 				log.Fatal("error reading from chl 2")
 			}
@@ -1716,25 +1724,15 @@ func tailCursorLagReport()(lastLag int64,lagTrail string){
 
 func finalReport() (x,y,z int64){
 
-	var loadTotal = int64(0)
 	var readTotal = int64(0)
+
+	var insertTotal = int64(0)
 	var updateTotal = int64(0)
 	
 
-	ARR_LOAD_CUR, ok1 := (<- chl)
+
+	ARR_READ_CUR, ok1 := (<- chr)
 	if ok1 {
-		for k,_ := range ARR_LOAD_CUR {
-			v2 := ARR_LOAD_TOT[k]
-			loadTotal += v2
-			log.Printf("thread %v - load ops %v - ", k , v2)
-		}
-	} else {
-		log.Fatal("error reading from chl 1")
-	}
-
-
-	ARR_READ_CUR, ok2 := (<- chr)
-	if ok2 {
 		for k,_ := range ARR_READ_CUR {
 			v2 := ARR_READ_TOT[k]
 			v2 *= readBatchSize
@@ -1744,6 +1742,21 @@ func finalReport() (x,y,z int64){
 	} else {
 		log.Fatal("error reading from chr 1")
 	}
+
+
+
+
+	ARR_INSERT_CUR, ok2 := (<- chl)
+	if ok2 {
+		for k,_ := range ARR_INSERT_CUR {
+			v2 := ARR_INSERT_TOT[k]
+			insertTotal += v2
+			log.Printf("thread %v - load ops %v - ", k , v2)
+		}
+	} else {
+		log.Fatal("error reading from chl 1")
+	}
+
 
 	 
 
@@ -1759,7 +1772,7 @@ func finalReport() (x,y,z int64){
 		log.Fatal("error Updateing from chu 1")
 	}
 
-	return loadTotal, readTotal, updateTotal 
+	return readTotal, insertTotal, updateTotal 
 	 
 
 	
@@ -1775,7 +1788,7 @@ func loadInsert(idxThread int32 , batchStamp int64){
 
 	conn := getConn()
 	defer conn.Close()
-	colOffers := getCollection( conn, CFG.Main.DatabaseName, offers  )
+	colOffers := getMainDBCollection( conn, CFG.Main.DatabaseName, offers  )
 	
 	for i:=batchStamp ; i < batchStamp+insertsPerThread; i++ {
 		
@@ -1829,7 +1842,7 @@ func funcLoadRead()  func(idxThread int32) {
 
 		conn := getConn()
 		defer conn.Close()
-		colOffers := getCollection(conn,CFG.Main.DatabaseName,offers)
+		colOffers := getMainDBCollection(conn,CFG.Main.DatabaseName,offers)
 
 		getPartitionStart := funcPartitionStart()
 		
@@ -1903,7 +1916,7 @@ func loadUpdate(idxThread int32 ) {
 
 	conn := getConn()
 	defer conn.Close()
-	colOffers := getCollection(conn,CFG.Main.DatabaseName,offers)
+	colOffers := getMainDBCollection(conn,CFG.Main.DatabaseName,offers)
 
 	getPartitionStart := funcPartitionStart()
 	
@@ -2014,7 +2027,7 @@ func funcPartitionStart() func(threadIdx int32, forReadOrUpdate bool) (x,y mongo
 
 		conn := getConn()
 		defer conn.Close()
-		colOffers := getCollection(conn,CFG.Main.DatabaseName,offers)
+		colOffers := getMainDBCollection(conn,CFG.Main.DatabaseName,offers)
 		
 		
 
@@ -2096,8 +2109,12 @@ func funcPartitionStart() func(threadIdx int32, forReadOrUpdate bool) (x,y mongo
 func x5_______helpers___________(){}
 
 
-
-func OsFreeMemMB()(membytes int64, err error) {
+/*
+	executes a "free" command
+	to retrieve physical memory
+	on the app machine
+*/
+func PhysicalMemoryOfAppMachine()(membytes int64, err error) {
 	membytes = 0
 	err = nil
 	cmd := exec.Command("tr", "a-z", "A-Z")
@@ -2108,7 +2125,7 @@ func OsFreeMemMB()(membytes int64, err error) {
 	cmd.Stdout = &out
 	err = cmd.Run()
 	if err != nil {
-		log.Fatal("OsFreeMemMB: ",err)
+		log.Fatal("PhysicalMemoryOfAppMachine: ",err)
 	}
 	//fmt.Printf("\nfree says1: %q\n", out.String())
 	
