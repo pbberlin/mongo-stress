@@ -1,0 +1,23 @@
+	{  "_id" : "offerStore_operation_scale",  "partitioned" : true,  "primary" : "lvl3_repl02" }
+		offerStore_operation_scale.offers.test
+			shard key: { "_id" : 1 }
+			chunks:
+				lvl3_repl02	27
+				lvl3_repl01	26
+			too many chunks to print, use verbose if you want to force print
+		offerStore_operation_scale.offersByLastUpdated
+			shard key: { "_id" : 1 }
+			chunks:
+				lvl3_repl01	1
+				lvl3_repl02	2
+			{ "_id" : { "$minKey" : 1 } } -->> { "_id" : "1376570760::520ccd78bead0729fdc17f88::b30" } on : lvl3_repl01 { "t" : 2, "i" : 0 } 
+			{ "_id" : "1376570760::520ccd78bead0729fdc17f88::b30" } -->> { "_id" : "1376570761::520ccd79bead0729fdc194eb::b30" } on : lvl3_repl02 { "t" : 2, "i" : 2 } 
+			{ "_id" : "1376570761::520ccd79bead0729fdc194eb::b30" } -->> { "_id" : { "$maxKey" : 1 } } on : lvl3_repl02 { "t" : 2, "i" : 3 } 
+		offerStore_operation_scale.offersByShop
+			shard key: { "_id" : 1 }
+			chunks:
+				lvl3_repl01	1
+				lvl3_repl02	2
+			{ "_id" : { "$minKey" : 1 } } -->> { "_id" : "1::520ccd78bead0729fdc17f89::b30" } on : lvl3_repl01 { "t" : 2, "i" : 0 } 
+			{ "_id" : "1::520ccd78bead0729fdc17f89::b30" } -->> { "_id" : "9995::520ccd78bead0729fdc18922::b30" } on : lvl3_repl02 { "t" : 2, "i" : 2 } 
+			{ "_id" : "9995::520ccd78bead0729fdc18922::b30" } -->> { "_id" : { "$maxKey" : 1 } } on : lvl3_repl02 { "t" : 2, "i" : 3 } 
