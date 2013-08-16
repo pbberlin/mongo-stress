@@ -15,7 +15,7 @@ It is also a Mongo Load Tester
 
 
 Todo
-	tailCursorLogInc( ... ,newTimeOplog )
+	tailCursorLagInc( ... ,newTimeOplog )
 		=> make an array of shards for each newTimeOplog-Datum
 		=> compute the average newTimeOplog across all shards
 		=> update the damn thing only every 100 call
@@ -69,14 +69,11 @@ var ARR_READ_CUR = make([]int64 ,READERS_CONC_MAX)
 var chr chan []int64 = make(chan []int64 ,1)      // sync channel read
 
 
-
-
 var INSERTER_COUNTER  = int32(0)
 var INSERTERS_CONC_MAX=	int32(1)
 var ARR_INSERT_TOT = make( []int64 ,INSERTERS_CONC_MAX )
 var ARR_INSERT_CUR = make( []int64, INSERTERS_CONC_MAX )
 var chl chan []int64 = make(chan []int64 ,1)      // sync channel load
-
 
 
 var UPDATER_COUNTER	  = int32(0)
@@ -117,7 +114,8 @@ const updateBatchSize= 100
 const insertsPerThread  = int64(400)  // if oplog is not big enough, causes "cursor not found"
 
 
-var cht chan int64   = make(chan   int64 ,1)	    // channel cursor tail
+var cht chan int64   = make(chan   int64 ,1)	    // channel cursor tail sum
+
 var tailTotal = int64(0)
 
 var cq  chan int	 = make(chan   int   )		      // channel quit
@@ -128,15 +126,21 @@ var	tsStart     int64	     = tStart.Unix()				//	int64 - but only lower 32 bits 
 var	tsStartNano int64	     = tStart.UnixNano()		//  all 64 bits are filled, seconds in higher 32 bits, nanos in lower 32 bits
 
 
-var timeLastOplogOperation  int64 = time.Now().Unix()
 var timeLastSaveOperation   int64 = time.Now().Unix()
+
+/*
+	... = make(chan map[string]int64,10) MUST be supplied here
+	  otherwise the channel is "nil" and blocks forever
+*/
+var chOplogLag chan map[string]int64 = make(chan map[string]int64,1)
+
 const sizeLagReport = 4
 var lv []int64 = make( []int64, sizeLagReport )
 
 
 
 
-var csvRecord map[string]int64 = make(map[string]int64)
+var csvRecord map[string]int64 = make(map[string]int64)  // "An initial allocation is made according to the size but the resulting map has length 0"
 var singleInstanceRunning bool = false
 
 
@@ -170,7 +174,7 @@ var useHashedInsertId  int32 = 0
 
 
 func main() {
-
+	
     flag.Parse()
     if *cpuprofile != "" {
         f, err := os.Create(*cpuprofile)
@@ -331,7 +335,8 @@ func changeLoadThreads(w http.ResponseWriter, r *http.Request, dummy string) {
 
 		// loading already started - carefully intervene by blocking the channel
 		if( int32(newLoadersConcMax) > INSERTERS_CONC_MAX ){
-			ARR_INSERT_CUR, ok := (<- chl)
+			var ok bool
+			ARR_INSERT_CUR, ok = (<- chl)
 	  	//p2( w, "cur len %v \n", len(ARR_INSERT_CUR) )
 			if ok {
 				ARR_INSERT_TOT = make( []int64 , newLoadersConcMax )
@@ -380,7 +385,8 @@ func changeReadThreads(w http.ResponseWriter, r *http.Request, dummy string) {
 
 		// reading already started - carefully intervene by blocking the channel
 		if( int32(newReadersConcMax) > READERS_CONC_MAX ){
-			ARR_READ_CUR, ok := (<- chr)
+			var ok bool
+			ARR_READ_CUR, ok = (<- chr)
 	  	//p2( w, "cur len %v \n", len(ARR_READ_CUR) )
 			if ok {
 				ARR_READ_TOT = make( []int64 , newReadersConcMax )
@@ -430,7 +436,8 @@ func changeUpdateThreads(w http.ResponseWriter, r *http.Request, dummy string) {
 
 		// Updateing alUpdatey started - carefully intervene by blocking the channel
 		if( int32(newUpdateersConcMax) > UPDATERS_CONC_MAX ){
-			ARR_UPDATE_CUR, ok := (<- chu)
+			var ok bool
+			ARR_UPDATE_CUR, ok = (<- chu)
 	  	//p2( w, "cur len %v \n", len(ARR_UPDATE_CUR) )
 			if ok {
 				ARR_UPDATE_TOT = make( []int64 , newUpdateersConcMax )
@@ -598,8 +605,6 @@ func startHandler(w http.ResponseWriter, r *http.Request, params string) {
 	go spawnUpdates()
 
 
-
-
 	// no throwing the "syncing" balls onto the field:
 	chl <- ARR_INSERT_CUR
 
@@ -607,16 +612,20 @@ func startHandler(w http.ResponseWriter, r *http.Request, params string) {
 
 	chu <- ARR_UPDATE_CUR
 
-	cht <- int64(0)
-
+	cht <- 0
+	
+	chOplogLag <- make(map[string]int64,10)
+	
+	fmt.Println(" init data on all one-sized-channels has been sent (balls for playing ping pong...)\n")
 
 	renderTemplateNewCompile( w ,"main_body_chart", c )	
 	Flush1(w)
 	
 	
 	// the tailing cursor and stopHandlers may send a quit signal via cq
+	// cq is the only ZERO sized channel
 	x := <- cq
-	log.Println("quit signal received: ", x)
+	fmt.Println("quit signal received: ", x)
 
 
 	tsFinish := time.Now().Unix()
@@ -1190,6 +1199,9 @@ func iterateTailCursor( shardOrSelf map[string]string ){
 
 	conn := getConn()
 	defer conn.Close()
+	
+	myShardIdentifier := fmt.Sprint( shardOrSelf["rsName"], shardOrSelf["ipAddress"],shardOrSelf["portNumber"]  )
+
 
 
 	//oplogSubscription        := getMainDBCollection( conn, CFG.Main.DatabaseName, changelogCol  )
@@ -1199,6 +1211,7 @@ func iterateTailCursor( shardOrSelf map[string]string ){
 
 
 	fctfuncRecurseMsg   := funcRecurseMsg("recursion ")
+	tailCursorLagInc    := funcTailCursorLagInc( myShardIdentifier ) 
 
 	c := getTailCursorMain( shardOrSelf   )
 
@@ -1207,7 +1220,7 @@ func iterateTailCursor( shardOrSelf map[string]string ){
 		return
 	}
 
-
+	counterForHasNext := int64(0)
 
 	for {
 		
@@ -1260,7 +1273,7 @@ func iterateTailCursor( shardOrSelf map[string]string ){
 					log.Fatal("m[ts] not a valid timestamp")	
 				}
 				oplogOpTime := int64(operationTimeStamp) >> 32
-				_,_ =  tailCursorLogInc( 0, oplogOpTime )	
+				tailCursorLagInc( 0, oplogOpTime )	
 				
 				
 				
@@ -1369,7 +1382,12 @@ func iterateTailCursor( shardOrSelf map[string]string ){
 				fmt.Print( fctfuncRecurseMsg() )
 			}
 
-			incTailCounter()
+			counterForHasNext++
+			if counterForHasNext > 9 {
+				incTailCounter(counterForHasNext)
+				counterForHasNext = 0
+			}
+			
 
 		}
 
@@ -1596,16 +1614,14 @@ func writeLoadReadUpdateInfo( freqPerSec float64 ) {
 func writeTailInfo( freqPerSec float64){
 
 		cntTail,ok := (<- cht) 
-
+		
 		if ok {
-			tailTotal += cntTail
-	
 			perSec := float64(cntTail) * freqPerSec
 			perSec  = math.Trunc( 10* perSec) / 10
 			//fmt.Print(" ", perSec," ", cntTail, " ", freqPerSec)
 			fmt.Printf( "%10v",perSec )			
-			csvRecord["Tails per Sec * 10"] = int64(perSec/ 10) 
-	
+			csvRecord["Tails per Sec * 10"] = int64(perSec/ 10)
+			tailTotal += cntTail
 		} else {
 			log.Fatal("error reading from cht")
 		}
@@ -1616,10 +1632,11 @@ func writeTailInfo( freqPerSec float64){
 
 
 
-func incTailCounter(){
+func incTailCounter(cntr int64){
+
 		cntTail,ok := (<- cht)
 		if ok {
-			cntTail++
+			cntTail += cntr
 			cht  <- cntTail
 			//print("cntTail:",cntTail)
 		} else {
@@ -1634,7 +1651,8 @@ func incReadCounter(i int64, idxThread int32){
 
 		const chunkSize = 100
 		if (i+1) % chunkSize == 0 {
-			ARR_READ_CUR, ok := (<- chr)
+			var ok bool			
+			ARR_READ_CUR, ok = (<- chr)
 			if ok {
 				ARR_READ_CUR[idxThread] += chunkSize
 				chr <- ARR_READ_CUR
@@ -1649,7 +1667,8 @@ func incInsertCounter(i int64, idxThread int32){
 	
 		const chunkSize = 100
 		if (i+1) % chunkSize == 0 {
-			ARR_INSERT_CUR, ok := (<- chl)
+			var ok bool						
+			ARR_INSERT_CUR, ok = (<- chl)
 			if ok {
 				ARR_INSERT_CUR[idxThread] += chunkSize
 				chl <- ARR_INSERT_CUR
@@ -1665,7 +1684,8 @@ func incUpdateCounter(i int64, idxThread int32){
 	
 		const chunkSize = 100
 		if (i+1) % chunkSize == 0 {
-			ARR_UPDATE_CUR, ok := (<- chu)
+			var ok bool			
+			ARR_UPDATE_CUR, ok = (<- chu)
 			if ok {
 				ARR_UPDATE_CUR[idxThread] += chunkSize
 				chu <- ARR_UPDATE_CUR
@@ -1677,27 +1697,68 @@ func incUpdateCounter(i int64, idxThread int32){
 }
 
 
-func tailCursorLogInc(newInsertUpdateSaveTime,newTimeOplog int64) (x,y int64) {
-	
-		if  newInsertUpdateSaveTime > 1 {
-		  atomic.StoreInt64( &timeLastSaveOperation, newInsertUpdateSaveTime, )
-		}
+func funcTailCursorLagInc(argMapKey string)   func(newInsertUpdateSaveTime,newTimeOplog int64){
 
-		if  newTimeOplog > 1   {
-			atomic.StoreInt64( &timeLastOplogOperation, newTimeOplog, )
+		var cntrInsertUpdate int64 = int64(0)
+		const chunkSizeInsertUpdate = 100
+		
+		
+		var cntrTailTime int64 = int64(0)
+		const chunkSizeTailTime = 20
+		var internalMapKey string = argMapKey
+
+		return func(newInsertUpdateSaveTime,newTimeOplog int64){
+			
+			
+			if  newInsertUpdateSaveTime > 1 {
+
+				cntrInsertUpdate++
+				if cntrInsertUpdate % chunkSizeInsertUpdate == 0 {
+				  atomic.StoreInt64( &timeLastSaveOperation, newInsertUpdateSaveTime, )
+				}
+			}
+		
+			if  newTimeOplog > 1   {
+				cntrTailTime++
+
+				if cntrTailTime % chunkSizeTailTime == 0 {
+					tmpMap, ok := (<- chOplogLag)
+					if ok {
+						tmpMap[internalMapKey] =  newTimeOplog
+						chOplogLag <- tmpMap
+					} else {
+						log.Fatal("error reading from chOplogLag1")
+					}
+				}
+
+			}
+
+
+
 		}
-	
-	  effInsertSaveTime :=  atomic.LoadInt64(&timeLastSaveOperation)
-	  effTimeOplog	    :=  atomic.LoadInt64(&timeLastOplogOperation)
-	  
-	  return effInsertSaveTime,effTimeOplog
 
 }
 
 
 func tailCursorLagReport()(lastLag int64,lagTrail string){
 
-	effInsertSaveTime, effTimeOplog :=  tailCursorLogInc(0,0)
+  effInsertSaveTime :=  atomic.LoadInt64(&timeLastSaveOperation)
+  effTimeOplog	    :=  int64(0)
+	tmpMap, ok := (<- chOplogLag)
+	if ok {
+		for k,v := range tmpMap {
+			effTimeOplog += v
+			//fmt.Printf(" %v - %v - %v - %v", k, v, effInsertSaveTime, v- effInsertSaveTime)
+		}
+		if len(tmpMap) > 0 {
+			effTimeOplog = effTimeOplog / int64(len(tmpMap)	)
+		}
+		chOplogLag <- make(map[string]int64,10)			// reset 
+	} else {
+		log.Fatal("error reading from chOplogLag2")
+	}
+  
+  
 
 	if lv[0] != effTimeOplog{
 		var lvTmp []int64 = make( []int64, sizeLagReport )
@@ -1806,7 +1867,8 @@ func loadInsert(idxThread int32 , batchStamp int64){
 	
 	
 	fctfuncRecurseMsg   := funcRecurseMsg( fmt.Sprint("loadInsert",idxThread," "))
-
+	tailCursorLagInc    := funcTailCursorLagInc( fmt.Sprint("inserter",idxThread) ) 
+	
 	conn := getConn()
 	defer conn.Close()
 	colOffers := getMainDBCollection( conn, CFG.Main.DatabaseName, offers  )
@@ -1838,7 +1900,7 @@ func loadInsert(idxThread int32 , batchStamp int64){
 		}
 
 
-		if useHashedInsertId	> 0 || true {
+		if useHashedInsertId	> 0  {
 			io.WriteString( h, fmt.Sprint( i , "The salt is getting dryer!") )
 			// h is now an an array of 16 uint8 numbers
 
@@ -1865,8 +1927,8 @@ func loadInsert(idxThread int32 , batchStamp int64){
 				log.Fatal( fmt.Sprint( "could not transform ", hashedIdString24, " len(",len(hashedIdString24) ,") into bsjon Oid - error: ", errConv,"\n") )
 			}
 			newDoc["_id"] = hashedOid
+			//fmt.Print(" ", newDoc["_id"])
 		}
-
 		
 		
 		err := colOffers.Insert(newDoc)
@@ -1876,7 +1938,7 @@ func loadInsert(idxThread int32 , batchStamp int64){
 		log.Print( fctfuncRecurseMsg() )
 
 		incInsertCounter(i,idxThread)
-		_,_ =  tailCursorLogInc( time.Now().Unix() ,0)	
+		tailCursorLagInc( time.Now().Unix() ,0)	
 		
 	}
 	atomic.AddInt32( &INSERTER_COUNTER, -1 )
@@ -1969,6 +2031,7 @@ func loadUpdate(idxThread int32 ) {
 
 	//fmt.Println( "loadUpdate: ", idxThread , batchStamp  )	
 	fctfuncRecurseMsg := funcRecurseMsg( fmt.Sprint("loadUpdate",idxThread," "))
+	tailCursorLagInc  := funcTailCursorLagInc( fmt.Sprint("updater",idxThread) ) 
 
 
 	conn := getConn()
@@ -2037,7 +2100,7 @@ func loadUpdate(idxThread int32 ) {
 			
 			log.Print( fctfuncRecurseMsg() )
 			incUpdateCounter( updateBatchSize*i + j,idxThread )
-			_,_ =  tailCursorLogInc( time.Now().Unix() ,0)
+			tailCursorLagInc( time.Now().Unix() ,0)
 
 
 			minOidNextRead = tmpLoopOid
