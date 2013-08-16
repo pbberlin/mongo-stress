@@ -62,24 +62,25 @@ const secondsDefer = 4							// upon cursor not found error - amount of sleep  -
 const secondsDeferTailCursor = 1		// after sleep - set back additional x seconds
 
 
-var LOADER_COUNTER  = int32(0)
-var INSERTERS_CONC_MAX=	int32(0)
-var ARR_INSERT_TOT = make( []int64 ,INSERTERS_CONC_MAX )
-var ARR_INSERT_CUR = make( []int64, INSERTERS_CONC_MAX )
-var chl chan []int64 = make(chan []int64 ,1)      // sync channel load
-
-
-
 var READER_COUNTER	  = int32(0)
-var READERS_CONC_MAX	= int32(1)
+var READERS_CONC_MAX	= int32(0)
 var ARR_READ_TOT = make([]int64 ,READERS_CONC_MAX)
 var ARR_READ_CUR = make([]int64 ,READERS_CONC_MAX)
 var chr chan []int64 = make(chan []int64 ,1)      // sync channel read
 
 
 
+
+var INSERTER_COUNTER  = int32(0)
+var INSERTERS_CONC_MAX=	int32(1)
+var ARR_INSERT_TOT = make( []int64 ,INSERTERS_CONC_MAX )
+var ARR_INSERT_CUR = make( []int64, INSERTERS_CONC_MAX )
+var chl chan []int64 = make(chan []int64 ,1)      // sync channel load
+
+
+
 var UPDATER_COUNTER	  = int32(0)
-var UPDATERS_CONC_MAX	= int32(1)
+var UPDATERS_CONC_MAX	= int32(0)
 var ARR_UPDATE_TOT = make([]int64 ,UPDATERS_CONC_MAX)
 var ARR_UPDATE_CUR = make([]int64 ,UPDATERS_CONC_MAX)
 var chu chan []int64 = make(chan []int64 ,1)      // sync channel UPDATE
@@ -123,7 +124,8 @@ var cq  chan int	 = make(chan   int   )		      // channel quit
 
 
 var	tStart  time.Time  = time.Now()
-var	tsStart int64	     = tStart.Unix()
+var	tsStart     int64	     = tStart.Unix()				//	int64 - but only lower 32 bits are filled
+var	tsStartNano int64	     = tStart.UnixNano()		//  all 64 bits are filled, seconds in higher 32 bits, nanos in lower 32 bits
 
 
 var timeLastOplogOperation  int64 = time.Now().Unix()
@@ -163,6 +165,7 @@ var SHARDS map[string]map[string]string  = make( map[string]map[string]string )
 var cpuprofile = flag.String("cpuprofile", "", "write cpu profile to file")
 
 var updateSecondaryIndize int32 = 0
+var useHashedInsertId  int32 = 0
 
 
 
@@ -191,8 +194,6 @@ func main() {
 	
 	
 	
-
-	
 	printHelperCommands()
 	
 	http.HandleFunc("/"	  , elseHandler)
@@ -205,6 +206,7 @@ func main() {
   http.HandleFunc("/changeUpdateThreads/" , subClassOfHandlerFunc(changeUpdateThreads))
   http.HandleFunc("/getConfigInfo/" , subClassOfHandlerFunc(getConfigInfo))
   http.HandleFunc("/toggleSecondaryIndize/" , subClassOfHandlerFunc(toggleSecondaryIndize))
+  http.HandleFunc("/toggleHashedId/" , subClassOfHandlerFunc(toggleHashedId))
   http.HandleFunc("/reloadCfg/" , subClassOfHandlerFunc(reloadCfg))
   
   
@@ -264,6 +266,7 @@ func elseHandler(w http.ResponseWriter, r *http.Request) {
 		"changeUpdateThreads": "changeUpdateThreads",
 		"getConfigInfo": "getConfigInfo",
 		"toggleSecondaryIndize": "toggleSecondaryIndize",
+		"toggleHashedId": "toggleHashedId",
 		"reloadCfg": "reloadCfg",
 		
 		"command-without-handler":  "bla" ,
@@ -474,6 +477,7 @@ func getConfigInfo(w http.ResponseWriter, r *http.Request, params string) {
 	mapCounts["inpReadThreads"] = READERS_CONC_MAX
 	mapCounts["inpUpdateThreads"] = UPDATERS_CONC_MAX
 	mapCounts["inpUpdateSecondaryIndize"] = int32(updateSecondaryIndize)
+	mapCounts["inpHashedId"] = int32(useHashedInsertId)
  	arrByte,err := json.Marshal( mapCounts ) 
  	if err != nil {
 		p2(w,"Marshal Map to Json - %v",err) 		
@@ -494,6 +498,20 @@ func toggleSecondaryIndize(w http.ResponseWriter, r *http.Request, params string
 		updateSecondaryIndize = 1
 	}
  	p2( w, "changing updateSecondaryIndize to %v\n", updateSecondaryIndize )
+	
+	//getConfigInfo(w , r , params )	
+	
+}
+
+
+func toggleHashedId(w http.ResponseWriter, r *http.Request, params string) {
+	
+	if  useHashedInsertId > 0 {
+		useHashedInsertId = 0	
+	} else {
+		useHashedInsertId = 1
+	}
+ 	p2( w, "changing useHashedInsertId to %v\n", useHashedInsertId )
 	
 	//getConfigInfo(w , r , params )	
 	
@@ -626,14 +644,14 @@ func spawnInserts(){
 	monotonicInc := int32(0)
 	for {
 		
-		lc := atomic.LoadInt32( &LOADER_COUNTER )
+		lc := atomic.LoadInt32( &INSERTER_COUNTER )
 		if lc > INSERTERS_CONC_MAX-1 {
 			time.Sleep( 500 * time.Millisecond )
 			continue
 		}
 		
 
-		atomic.AddInt32( &LOADER_COUNTER, 1, )
+		atomic.AddInt32( &INSERTER_COUNTER, 1, )
 		batchStamp := int64(time.Now().Unix() )<<32  +  int64(monotonicInc)*insertsPerThread
 		go loadInsert( lc, batchStamp)
 		monotonicInc++
@@ -1806,16 +1824,8 @@ func loadInsert(idxThread int32 , batchStamp int64){
 			case shopRnd < 8*factor:  shopId = 2
 			default: shopId = shopRnd
 		}
-		
-		//io.WriteString(h, "The fog is getting thicker!")
-		io.WriteString( h, fmt.Sprint( i , "The fog is getting thicker!") )
-		hashedId := fmt.Sprintf( "%x", h.Sum(nil) )
-		//fmt.Print(" ", hashedId)
 
-		
-		
-		err := colOffers.Insert(mongo.M{"offerId": i,
-				"_id" : hashedId,
+		newDoc := mongo.M{"offerId": i,
 			 "shopId"	       : shopId, 
 			 "categoryId"    : 15,
 			 "lastSeen"      : int32(time.Now().Unix()) ,
@@ -1825,7 +1835,41 @@ func loadInsert(idxThread int32 , batchStamp int64){
 			 "description"   : strings.Repeat( fmt.Sprint("description",i), 31),
 			 // server side javascript - even if possible - locks the entire collection
 			 //"description": "new Array( 44 ).join( \"description\")",					
-		})
+		}
+
+
+		if useHashedInsertId	> 0 || true {
+			io.WriteString( h, fmt.Sprint( i , "The salt is getting dryer!") )
+			// h is now an an array of 16 uint8 numbers
+
+			//fmt.Printf( "\n %x %#v %T -  size %v\n", h.Sum(nil) , h.Sum(nil) , h.Sum(nil), len(h.Sum(nil) ) )
+
+			/* 
+				by printing 16 Bytes to a string 
+				we create a string of 16 [0-e][0-e] Groups
+				making a len(string) = 32
+			*/
+			hashedIdString32 := fmt.Sprintf( "%x", h.Sum(nil) )
+
+			/* 
+					now we take the first twelve bytes (or 24 chars) out of 16 Bytes (32 chars)
+					see in the mongo driver package - bson.go - docu of func NewObjectId() ObjectId ...
+					
+					Thus we get a "regular formatted" mongo oid - with a unix.now part of 4 bytes
+					and a "nanoseconds" part of 8 Bytes -
+					only that they are completely RANDOM now
+			*/			
+			hashedIdString24 := hashedIdString32[0:24]						
+			hashedOid,errConv := mongo.NewObjectIdHex(  hashedIdString24  )
+			if errConv != nil {
+				log.Fatal( fmt.Sprint( "could not transform ", hashedIdString24, " len(",len(hashedIdString24) ,") into bsjon Oid - error: ", errConv,"\n") )
+			}
+			newDoc["_id"] = hashedOid
+		}
+
+		
+		
+		err := colOffers.Insert(newDoc)
 		if err != nil {
 			log.Fatal(   fmt.Sprint( "mongo loadInsert error: ", err,"\n") )		
 		}
@@ -1835,7 +1879,7 @@ func loadInsert(idxThread int32 , batchStamp int64){
 		_,_ =  tailCursorLogInc( time.Now().Unix() ,0)	
 		
 	}
-	atomic.AddInt32( &LOADER_COUNTER, -1 )
+	atomic.AddInt32( &INSERTER_COUNTER, -1 )
 	fmt.Print(" -ld_ins",idxThread,"_fin")
 	
 }

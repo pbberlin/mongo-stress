@@ -18,14 +18,23 @@
 '>
 	<a href='#'  onclick='javascript:cmdStart();return false;' accesskey='s' ><u>S</u>tart Load</a><br>
 	<a href='#'  onclick='javascript:cmdChartingToggle() ;return false;' accesskey='c' >Start/Stop <u>C</u>harting</u></a><br>
-	<br>
 	<a href='#'  onclick='javascript:cmdStop() ;return false;' accesskey='p' >Sto<u>p</u> Server App Loading</a><br>
 	<br>
-	<a href='#'  onclick='javascript:cmdSecondaryIndize() ;return false;' accesskey='' >Write Secondary Indize</a>&nbsp; 
+	<a style='display:inline-block;min-width:120px' href='#'  onclick='javascript:cmdSecondaryIndize() ;return false;' accesskey='' >Write Secondary Indize</a>&nbsp; 
 	<input 
 		type='text' 
 		id='inpUpdateSecondaryIndize'
 		name='inpUpdateSecondaryIndize'
+		style='width:20px' 
+		placeholder=''
+		disabled='disabled'
+	/>
+	<br>
+	<a style='display:inline-block;min-width:120px'  href='#'  onclick='javascript:cmdHashedId() ;return false;' accesskey='' >Use Hashed Insert Id</a>&nbsp; 
+	<input 
+		type='text' 
+		id='inpHashedId'
+		name='inpHashedId'
 		style='width:20px' 
 		placeholder=''
 		disabled='disabled'
@@ -271,6 +280,14 @@
 			getConfigInfo()
 		}
 
+
+		function cmdHashedId(){ 
+			$.ajax({
+				url: '/toggleHashedId/doesntmatter',
+				cache: false
+			})
+			getConfigInfo()
+		}
 
 
 
