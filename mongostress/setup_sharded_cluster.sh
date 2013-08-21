@@ -2,12 +2,6 @@
 
 PATH=/home/peter.buchmann/mongo/program/bin/:$PATH
 
-echo ~/mongo/program/bin/mongo b30.lvl.bln/admin -u admin -p mdbpw4US
-echo ~/mongo/program/bin/mongo b30.lvl.bln/offerStore_operation_scale -u scale_tester -p 32168
-echo ~/mongo/program/bin/mongo b30.lvl.bln:27018/admin  -u admin -p mdbpw4US
-
-echo "db.currentOp()" | ~/mongo/program/bin/mongo b30.lvl.bln/offerStore_operation_scale -u scale_tester -p 32168 >> currentOp.txt
-echo db.currentOp().inprog.forEach(    function(d){      if(   d.op != "read"  && d.op != "getmore"  )         printjson(d)      })
 
 
 sudo apt-key adv --keyserver keyserver.ubuntu.com --recv 7F0CEB10
@@ -230,8 +224,24 @@ insert test 2
 3 stresser each with <= 8 stress threads
 data size < phys. RAM
 < 25 Percent per Shard CPU 
-< 25 Percent per Shard IOStat Utilization, avg 5 percent
-< 950 Inserts per Shard
+~  5 Percent per Shard IOStat Utilization, avg +-20 
+< 950 Inserts per Shard, ~ 5700 whole cluster
 
 MMS background flush  < 1 Sec
 MMS page faults, network, lock percent - all tiny
+
+
+update test
+===================
+6 shards
+3 mongos, 1/2/4 GB RAM - identical performance
+3 stresser with 24 stress threads each
+40 mio offers, 1 kB each, 50 GB storage incl. indexes, equally distributed via salted hash of offerid 
+data size < phys. RAM (sum of shards)
+~ 1600 Updates/Sec per Shard,  ~ 9500 whole cluster
+~ 60 Percent CPU load per shard (primary)
+~ 50 Percent IOStat Utilization per shard, avg +-50 
+~ 40 Percent CPU load per mongos
+
+MMS page faults, network, lock percent - all tiny
+MMS background flush  ~5 Sec		=> IO subsystem on the verge

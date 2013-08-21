@@ -1987,7 +1987,7 @@ func funcLoadRead()  func(idxThread int32) {
 
 
 			var m mongo.M
-		  err := colOffers.Find(mongo.M{"_id": mongo.M{"$gte": loopMinOid,},}).Fields(mongo.M{"description": 0}).Skip(readBatchSize).Limit(1).One(&m)
+		  err := colOffers.Find(mongo.M{"_id": mongo.M{"$gte": loopMinOid,},}).Fields(mongo.M{"description": 0}).Sort( mongo.M{"_id":  1,}, ).Skip(readBatchSize).Limit(1).One(&m)
 			if err != nil  && err != mongo.Done {
 				log.Fatal(   fmt.Sprint( "mongo loadRead error: ", err,"\n") )		
 			}
