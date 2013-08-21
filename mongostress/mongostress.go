@@ -49,6 +49,7 @@ import (
  	"runtime/debug"
 	"crypto/md5" 	
 	"io"
+	"encoding/hex"	
 )
 
 
@@ -63,7 +64,7 @@ const secondsDeferTailCursor = 1		// after sleep - set back additional x seconds
 
 
 var READER_COUNTER	  = int32(0)
-var READERS_CONC_MAX	= int32(0)
+var READERS_CONC_MAX	= int32(1)
 var ARR_READ_TOT = make([]int64 ,READERS_CONC_MAX)
 var ARR_READ_CUR = make([]int64 ,READERS_CONC_MAX)
 var chr chan []int64 = make(chan []int64 ,1)      // sync channel read
@@ -110,7 +111,7 @@ var outputLevel int = 0
 
 
 const readBatchSize  = 100
-const updateBatchSize= 100
+const updateBatchSize= 1000
 const insertsPerThread  = int64(400)  // if oplog is not big enough, causes "cursor not found"
 
 
@@ -169,7 +170,7 @@ var SHARDS map[string]map[string]string  = make( map[string]map[string]string )
 var cpuprofile = flag.String("cpuprofile", "", "write cpu profile to file")
 
 var updateSecondaryIndize int32 = 0
-var useHashedInsertId  int32 = 0
+var useHashedInsertId     int32 = 1
 
 
 
@@ -1522,7 +1523,7 @@ func startTimerLog(){
 				}
 				fmt.Printf("%10v",sizeWorkDb)			
 
-				csvRecord["Hot Set to SysRAM"] = 100*(sizeWorkDb + sizeSumOplogs) / int64(resident)
+				csvRecord["Hot Set to SysRAM"] = 100*int64(resident) / (sizeWorkDb + sizeSumOplogs)
 
 				//csvRecord["Collection Size"] = s1
 				csvRecord["System RAM"] = int64( 100* resident / virtual)
@@ -1746,7 +1747,7 @@ func tailCursorLagReport()(lastLag int64,lagTrail string){
   effTimeOplog	    :=  int64(0)
 	tmpMap, ok := (<- chOplogLag)
 	if ok {
-		for k,v := range tmpMap {
+		for _,v := range tmpMap {
 			effTimeOplog += v
 			//fmt.Printf(" %v - %v - %v - %v", k, v, effInsertSaveTime, v- effInsertSaveTime)
 		}
@@ -1901,7 +1902,7 @@ func loadInsert(idxThread int32 , batchStamp int64){
 
 
 		if useHashedInsertId	> 0  {
-			io.WriteString( h, fmt.Sprint( i , "The salt is getting dryer!") )
+			io.WriteString( h, fmt.Sprint( i , "The salt is getting dryer!", time.Now().Unix() ) )
 			// h is now an an array of 16 uint8 numbers
 
 			//fmt.Printf( "\n %x %#v %T -  size %v\n", h.Sum(nil) , h.Sum(nil) , h.Sum(nil), len(h.Sum(nil) ) )
@@ -1933,7 +1934,11 @@ func loadInsert(idxThread int32 , batchStamp int64){
 		
 		err := colOffers.Insert(newDoc)
 		if err != nil {
-			log.Fatal(   fmt.Sprint( "mongo loadInsert error: ", err,"\n") )		
+			if strings.Contains( err.Error() , "E11000 duplicate key" ) {
+				fmt.Print(" rare cases of duplicate keys are normal - if MULTIPLE instances are running - AND md5 hashed ids are used. Skipping.")
+			} else {
+				log.Fatal(   fmt.Sprint( "mongo loadInsert error: ", err,"\n") )						
+			}
 		}
 		log.Print( fctfuncRecurseMsg() )
 
@@ -1963,9 +1968,9 @@ func funcLoadRead()  func(idxThread int32) {
 		defer conn.Close()
 		colOffers := getMainDBCollection(conn,CFG.Main.DatabaseName,offers)
 
-		getPartitionStart := funcPartitionStart()
+		partitionStart := funcPartitionStart()
 		
-		minOid,initMinOid:= getPartitionStart(idxThread, false )
+		minOid,initMinOid:= partitionStart(idxThread, false )
 		loopMinOid := initMinOid
 
 		i := int64(0)
@@ -2038,9 +2043,9 @@ func loadUpdate(idxThread int32 ) {
 	defer conn.Close()
 	colOffers := getMainDBCollection(conn,CFG.Main.DatabaseName,offers)
 
-	getPartitionStart := funcPartitionStart()
+	partitionStart := funcPartitionStart()
 	
-	minOid,initMinOid:= getPartitionStart(idxThread, true )
+	minOid,initMinOid:= partitionStart(idxThread, true )
 	minOidNextRead  := initMinOid
 
 
@@ -2048,16 +2053,14 @@ func loadUpdate(idxThread int32 ) {
 	for  {
 
 		i++
-		imax := int64( 10 * 1000 * 1000 * updateBatchSize  )			// make sure to loop our dataset at least two times
+		imax := int64( 10 * 1000 * 1000   )			// make sure to loop our dataset at least two times
 		if i > imax {
-			//log.Println( fmt. (" more than ",imax," iterations. LoopUpdate over.") )		
+			fmt.Println(" more than ",imax,"*",updateBatchSize," iterations. LoopUpdate over.")
 			break	
 		}
-		//fmt.Print( fmt.Sprint(" -u",i) )		
-
 
 	  cursor, errRd4Upd := colOffers.Find(  mongo.M{"_id": mongo.M{"$gte": minOidNextRead,},}).
-	  	Fields(mongo.M{"_id": 1}).Limit(updateBatchSize).Cursor()
+	  	Fields(mongo.M{"_id": 1}).Sort( mongo.M{"_id": 1} ).Limit(updateBatchSize).Cursor()
 		if errRd4Upd != nil   {
 
 			if errRd4Upd.Error() == "mongo: forupdate cursor has no more results" {
@@ -2087,9 +2090,6 @@ func loadUpdate(idxThread int32 ) {
 			}
 
 			now1 := int32(time.Now().Unix())
-//			errUpd := colOffers.Update(  mongo.M{  "_id": mongo.M{"$gte": tmpLoopOid,  "$lte": tmpLoopOid,}  , }  ,
-//		 			mongo.M{  "$inc": mongo.M{"lastSeen": -1, "countUpdates": 1} ,
-//		 		 	"$set": mongo.M{"lastUpdated": now1 }  }  )
 
 			errUpd := colOffers.Update(  mongo.M{  "_id": tmpLoopOid, }  ,
 		 			mongo.M{  "$inc": mongo.M{"lastSeen": -1, "countUpdates": 1} ,
@@ -2110,6 +2110,10 @@ func loadUpdate(idxThread int32 ) {
 
 		// we deliberately slow the single thread 
 		// so that we may scale in finer granularity
+		dbg1 := minOidNextRead.String()
+		//fmt.Print( " ", i, " u" , dbg1[:4])
+		//fmt.Print( " u" , dbg1[:4])
+		fmt.Print( " ",idxThread , dbg1[:4])
 		time.Sleep( 150 * time.Millisecond )
 
 		
@@ -2155,13 +2159,25 @@ func funcPartitionStart() func(threadIdx int32, forReadOrUpdate bool) (x,y mongo
 		// to postulate the minimum and maximum possible oids
 		minOidPostulated := mongo.MinObjectIdForTime( time.Date(1999, time.November,  1, 02, 01, 0, 222, time.Local))
 		maxOidPostulated := mongo.MinObjectIdForTime( time.Date(2030, time.December, 31, 23, 59, 0, 222, time.Local))
+
+
+		strMin := fmt.Sprint("00000000","00000000","00000001")
+		strMax := fmt.Sprint("eeeeeeee","eeeeeeee","eeeeeeee")
+		//fmt.Println(strMin , " - max " , strMax)
+		var errBoundingOids1, errBoundingOids2 error
+		minOidPostulated, errBoundingOids1 = mongo.NewObjectIdHex(strMin )   
+		maxOidPostulated, errBoundingOids2 = mongo.NewObjectIdHex(strMax )   
+		if errBoundingOids1 != nil || errBoundingOids2  != nil {
+			log.Fatal("1mongo.NewObjectIdHex with ", strMin, " or ", strMax , " failed:",errBoundingOids1,errBoundingOids2 )
+		}
+
 		if minOidPostulated > maxOidPostulated {
 			log.Fatal( "minOidPostulated must be smaller than maxOidPostulated", minOidPostulated , maxOidPostulated )
 		}
 
 		// with their help, we query the -real- minOid and maxOid of the current data set
 		var m1,m2 mongo.M
-		var err error
+		var err error 
 	  err = colOffers.Find(mongo.M{"_id": mongo.M{"$gte": minOidPostulated,},}).Fields(mongo.M{"_id": 1}).
 	  	Skip(0).Sort( mongo.M{"_id":  1,}, ).Limit(1).One(&m1)
 		if err != nil  && err != mongo.Done {
@@ -2186,6 +2202,7 @@ func funcPartitionStart() func(threadIdx int32, forReadOrUpdate bool) (x,y mongo
 			log.Print("max did not contain an OID - using a default ")				
 			oidMax = mongo.MinObjectIdForTime( time.Date(2030, time.December, 31, 23, 59, 0, 222, time.Local))
 		}
+		
 
 		/* Now we could either partition by record -count-
 				which brings different -seek- times 
@@ -2207,11 +2224,65 @@ func funcPartitionStart() func(threadIdx int32, forReadOrUpdate bool) (x,y mongo
 			if forReadOrUpdate {
 				divisor = UPDATERS_CONC_MAX
 			}
+			
+			if divisor == 0 {
+				divisor = 1				// avoid div by zero
+			}
+			
+			fraction := float64(threadIdx)/float64(divisor)
 
+
+			// old way - with all oids mongo-generated - containing insertion time
 			partitionTimeDiff := time.Duration(threadIdx)*diffTime / time.Duration(divisor)
-			//fmt.Println("diff",diffTime, partitionTimeDiff)				
 			timeMinThread := ctMin.Add( partitionTimeDiff )
 			minOidThread  := mongo.MinObjectIdForTime( timeMinThread )
+
+
+			// new way - all oids client generated - hashed - using all domain vom 0x0 to 0xffffffffffffffffffffffffffffffff
+			byteMin, errDec1 := hex.DecodeString(oidMin.String())
+			byteMax, errDec2 := hex.DecodeString(oidMax.String())
+			if errDec1 != nil  ||  errDec2 != nil  {
+				log.Fatal("hex.DecodeString error:",err)
+			}
+			if len(byteMin) != 12 {
+				log.Fatal("3 oid byte array len must be 12",len(byteMin) )
+			}
+			
+			var uintMin, uintMax uint64
+			for k,_ := range byteMin{
+				if k < 8 {
+					uintMin = uintMin << 8  			// *256
+					uintMax = uintMax << 8  			// *256
+					uintMin += uint64( byteMin[k] )
+					uintMax += uint64( byteMax[k] )
+				} 
+			}
+
+			uintDiff := uintMax - uintMin
+			
+			uintStartMin := uint64( float64(uintDiff) * fraction) + uintMin
+
+			strStartMin := fmt.Sprintf( "%x00000000", uintStartMin   )  // add 4 bytes - 8 chars
+			for {
+				if len(strStartMin) < 24 {
+					strStartMin = fmt.Sprint( "0" , strStartMin  )  // leading pad  with 0 if neccessary
+				}	else {
+					break	
+				}
+			}
+
+			fmt.Printf( " %4v \n %x \n %x \n %x \n %x \n %x \n %x \n %v \n", fraction,byteMin, byteMax, uintMin ,uintMax, uintDiff,uintStartMin,strStartMin )
+
+
+			
+			var errBoundingOids3 error
+			minOidThread, errBoundingOids3 = mongo.NewObjectIdHex( strStartMin )   
+			if errBoundingOids3 != nil  {
+				log.Fatal("2mongo.NewObjectIdHex with ", strStartMin, " failed: ", errBoundingOids3)
+			}
+
+
+			
 
 			//const layout2 = "01-02 15:04 05"
 			//fmt.Printf("threadIndex: %v, oid-min %v threadStart %v oid-max %v \n",threadIdx,oidMin.CreationTime().Format(layout2),minOidThread.CreationTime().Format(layout2),oidMax.CreationTime().Format(layout2) )

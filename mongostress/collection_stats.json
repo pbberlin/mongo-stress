@@ -1,0 +1,127 @@
+db.offers.test.stats(sc)
+{
+	"sharded" : true,
+	"ns" : "offer-db.offers.test",
+	"count" : 38997172,
+	"numExtents" : 149,
+	"size" : 40907,
+	"storageSize" : 51197,
+	"totalIndexSize" : 1560,
+	"indexSizes" : {
+		"_id_" : 1560
+	},
+	"avgObjSize" : 0.0010489734999245587,
+	"nindexes" : 1,
+	"nchunks" : 803,
+	"shards" : {
+		"sh1" : {
+			"ns" : "offer-db.offers.test",
+			"count" : 6284257,
+			"size" : 6592,
+			"avgObjSize" : 0.0010489704669939502,
+			"storageSize" : 6827,
+			"numExtents" : 24,
+			"nindexes" : 1,
+			"lastExtentSize" : 1775,
+			"paddingFactor" : 1,
+			"systemFlags" : 1,
+			"userFlags" : 0,
+			"totalIndexSize" : 261,
+			"indexSizes" : {
+				"_id_" : 261
+			},
+			"ok" : 1
+		},
+		"sh2" : {
+			"ns" : "offer-db.offers.test",
+			"count" : 6546172,
+			"size" : 6867,
+			"avgObjSize" : 0.0010490100168464868,
+			"storageSize" : 8874,
+			"numExtents" : 25,
+			"nindexes" : 1,
+			"lastExtentSize" : 2046,
+			"paddingFactor" : 1,
+			"systemFlags" : 1,
+			"userFlags" : 0,
+			"totalIndexSize" : 267,
+			"indexSizes" : {
+				"_id_" : 267
+			},
+			"ok" : 1
+		},
+		"sh3" : {
+			"ns" : "offer-db.offers.test",
+			"count" : 6551682,
+			"size" : 6872,
+			"avgObjSize" : 0.00104889095655131,
+			"storageSize" : 8874,
+			"numExtents" : 25,
+			"nindexes" : 1,
+			"lastExtentSize" : 2046,
+			"paddingFactor" : 1,
+			"systemFlags" : 1,
+			"userFlags" : 0,
+			"totalIndexSize" : 263,
+			"indexSizes" : {
+				"_id_" : 263
+			},
+			"ok" : 1
+		},
+		"sh4" : {
+			"ns" : "offer-db.offers.test",
+			"count" : 6537415,
+			"size" : 6858,
+			"avgObjSize" : 0.0010490384961028174,
+			"storageSize" : 8874,
+			"numExtents" : 25,
+			"nindexes" : 1,
+			"lastExtentSize" : 2046,
+			"paddingFactor" : 1,
+			"systemFlags" : 1,
+			"userFlags" : 0,
+			"totalIndexSize" : 255,
+			"indexSizes" : {
+				"_id_" : 255
+			},
+			"ok" : 1
+		},
+		"sh5" : {
+			"ns" : "offer-db.offers.test",
+			"count" : 6555156,
+			"size" : 6876,
+			"avgObjSize" : 0.001048945288258586,
+			"storageSize" : 8874,
+			"numExtents" : 25,
+			"nindexes" : 1,
+			"lastExtentSize" : 2046,
+			"paddingFactor" : 1,
+			"systemFlags" : 1,
+			"userFlags" : 0,
+			"totalIndexSize" : 257,
+			"indexSizes" : {
+				"_id_" : 257
+			},
+			"ok" : 1
+		},
+		"sh6" : {
+			"ns" : "offer-db.offers.test",
+			"count" : 6522490,
+			"size" : 6842,
+			"avgObjSize" : 0.001048985893424137,
+			"storageSize" : 8874,
+			"numExtents" : 25,
+			"nindexes" : 1,
+			"lastExtentSize" : 2046,
+			"paddingFactor" : 1,
+			"systemFlags" : 1,
+			"userFlags" : 0,
+			"totalIndexSize" : 257,
+			"indexSizes" : {
+				"_id_" : 257
+			},
+			"ok" : 1
+		}
+	},
+	"ok" : 1
+}
