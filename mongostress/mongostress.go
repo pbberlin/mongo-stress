@@ -110,8 +110,8 @@ var   mongoSecsEarlier mongo.Timestamp = mongo.Timestamp(5898548092499667758)	//
 var outputLevel int = 0
 
 
-const readBatchSize  = 100
-const updateBatchSize= 1000
+const readBatchSize   = 1000
+const updateBatchSize = 1000
 const insertsPerThread  = int64(400)  // if oplog is not big enough, causes "cursor not found"
 
 
@@ -177,7 +177,8 @@ var useHashedInsertId     int32 = 1
 func main() {
 	
     flag.Parse()
-    if *cpuprofile != "" {
+    if *cpuprofile != ""  {
+    		fmt.Println("CPU profile to ", *cpuprofile)
         f, err := os.Create(*cpuprofile)
         if err != nil {
             log.Fatal(err)
@@ -301,14 +302,19 @@ func elseHandler(w http.ResponseWriter, r *http.Request) {
 
 
 func stopHandler(w http.ResponseWriter, r *http.Request) {
-  	p2( w, "\nreceived quit signal by browser: %v", 1)
-  	Flush1(w)
+	
+	p2( w, "\nreceived quit signal by browser: %v", 1)
+	Flush1(w)
+	
+	log.Println(" sending quit signal: ", 1)
+	cq <- 1
+	time.Sleep( 50 * time.Millisecond )
+	
 
-		log.Println(" sending quit signal: ", 1)
-		cq <- 1
-  	time.Sleep( 50 * time.Millisecond )
-  	
-  	os.Exit(1)
+	pprof.StopCPUProfile()
+	log.Fatal("/exit handler called")
+	//os.Exit(1)
+
 }
 
 
@@ -1445,7 +1451,7 @@ func checkTailCursor( c mongo.Cursor  ) ( doBreak, hasNext  bool ){
 			fmt.Print( " hasNext() is false - await is over.")
 		}
 
-		fmt.Print( fmt.Sprintf( " dead or exhausted %v (max %v).", countNoNextValue, noNextValueMax) )
+		fmt.Print( fmt.Sprintf( " stillSeeking/Dead/Exhausted %v (max %v).", countNoNextValue, noNextValueMax) )
 
 		countNoNextValue++
 		if countNoNextValue > noNextValueMax {
@@ -1656,6 +1662,7 @@ func incReadCounter(i int64, idxThread int32){
 			ARR_READ_CUR, ok = (<- chr)
 			if ok {
 				ARR_READ_CUR[idxThread] += chunkSize
+				//ARR_READ_CUR[idxThread] = i
 				chr <- ARR_READ_CUR
 			} else {
 				log.Fatal("error reading from chr 2")
@@ -1672,6 +1679,7 @@ func incInsertCounter(i int64, idxThread int32){
 			ARR_INSERT_CUR, ok = (<- chl)
 			if ok {
 				ARR_INSERT_CUR[idxThread] += chunkSize
+				//ARR_INSERT_CUR[idxThread] = i
 				chl <- ARR_INSERT_CUR
 			} else {
 				log.Fatal("error reading from chl 2")
@@ -1689,6 +1697,7 @@ func incUpdateCounter(i int64, idxThread int32){
 			ARR_UPDATE_CUR, ok = (<- chu)
 			if ok {
 				ARR_UPDATE_CUR[idxThread] += chunkSize
+				//ARR_UPDATE_CUR[idxThread] = i
 				chu <- ARR_UPDATE_CUR
 			} else {
 				log.Fatal("error reading from chu 2")
@@ -1942,7 +1951,7 @@ func loadInsert(idxThread int32 , batchStamp int64){
 		}
 		log.Print( fctfuncRecurseMsg() )
 
-		incInsertCounter(i,idxThread)
+		incInsertCounter(i-batchStamp,idxThread)
 		tailCursorLagInc( time.Now().Unix() ,0)	
 		
 	}
@@ -1977,17 +1986,20 @@ func funcLoadRead()  func(idxThread int32) {
 		for  {
 
 			i++
-			imax := int64(10 * 1000 * 1000 * readBatchSize)		// make sure to read our dataset at least two times
+			imax := int64(10 * 1000 * 1000 )		// make sure to read our dataset at least two times
 			if i > imax {
-				//log.Println( fmt.Sprint(" more than ",imax," iterations. Tread over.") )		
+				fmt.Println(" more than ",imax,"*",readBatchSize," iterations. LoopRead over.")
 				break	
 			}
+			
+			
 			log.Print( fctfuncRecurseMsg() )
 			incReadCounter(i,idxThread)
 
 
 			var m mongo.M
-		  err := colOffers.Find(mongo.M{"_id": mongo.M{"$gte": loopMinOid,},}).Fields(mongo.M{"description": 0}).Sort( mongo.M{"_id":  1,}, ).Skip(readBatchSize).Limit(1).One(&m)
+		  err := colOffers.Find(mongo.M{"_id": mongo.M{"$gte": loopMinOid,},}).
+		   Fields(mongo.M{"description": 0}).Sort( mongo.M{"_id":  1,}, ).Skip(readBatchSize).Limit(1).One(&m)
 			if err != nil  && err != mongo.Done {
 				log.Fatal(   fmt.Sprint( "mongo loadRead error: ", err,"\n") )		
 			}
@@ -2004,11 +2016,17 @@ func funcLoadRead()  func(idxThread int32) {
 			} else if loopMinOid == tmpMinOid {
 				fmt.Print(" rd",idxThread, "_rst2")
 				loopMinOid = minOid
-				continue
 			} else {
 				//fmt.Println(idxThread, " new oid" , loopMinOid, tmpMinOid )
 				loopMinOid = tmpMinOid
 			}
+
+			if i % 100 == 0 {
+				dbg1 := loopMinOid.String()
+				//fmt.Print( " ", i, " u" , dbg1[:4])
+				fmt.Print( " ",idxThread,"r" , dbg1[:3])
+			}
+
 
 			lc := atomic.LoadInt32( &READER_COUNTER )
 			if lc > READERS_CONC_MAX {
@@ -2108,13 +2126,14 @@ func loadUpdate(idxThread int32 ) {
 			//printMap(m, false,"")
 		}
 
-		// we deliberately slow the single thread 
-		// so that we may scale in finer granularity
-		dbg1 := minOidNextRead.String()
-		//fmt.Print( " ", i, " u" , dbg1[:4])
-		//fmt.Print( " u" , dbg1[:4])
-		fmt.Print( " ",idxThread , dbg1[:4])
-		time.Sleep( 150 * time.Millisecond )
+		if i % 10 == 0 {
+			// we deliberately slow the single thread 
+			// so that we may scale in finer granularity
+			dbg1 := minOidNextRead.String()
+			//fmt.Print( " ", i, " u" , dbg1[:4])
+			fmt.Print( " ",idxThread,"u" , dbg1[:3])
+			time.Sleep( 150 * time.Millisecond )			
+		}
 
 		
 
@@ -2178,14 +2197,14 @@ func funcPartitionStart() func(threadIdx int32, forReadOrUpdate bool) (x,y mongo
 		// with their help, we query the -real- minOid and maxOid of the current data set
 		var m1,m2 mongo.M
 		var err error 
-	  err = colOffers.Find(mongo.M{"_id": mongo.M{"$gte": minOidPostulated,},}).Fields(mongo.M{"_id": 1}).
-	  	Skip(0).Sort( mongo.M{"_id":  1,}, ).Limit(1).One(&m1)
+	  err = colOffers.Find(mongo.M{"_id": mongo.M{"$gte": minOidPostulated,},}).
+	    Fields(mongo.M{"_id": 1}).Sort( mongo.M{"_id":  1,}, ).Skip(0).Limit(1).One(&m1)
 		if err != nil  && err != mongo.Done {
 			log.Fatal("query min error:",err)
 		}
 
-	  err = colOffers.Find(mongo.M{"_id": mongo.M{"$lte": maxOidPostulated,},}).Fields(mongo.M{"_id": 1}).
-	  	Skip(0).Sort( mongo.M{"_id": -1,}, ).Limit(1).One(&m2)
+	  err = colOffers.Find(mongo.M{"_id": mongo.M{"$lte": maxOidPostulated,},}).
+	  	Fields(mongo.M{"_id": 1}).Sort( mongo.M{"_id": -1,}, ).Skip(0).Limit(1).One(&m2)
 		if err != nil  && err != mongo.Done {
 			log.Fatal("query max error:",err)
 		}
@@ -2271,7 +2290,7 @@ func funcPartitionStart() func(threadIdx int32, forReadOrUpdate bool) (x,y mongo
 				}
 			}
 
-			fmt.Printf( " %4v \n %x \n %x \n %x \n %x \n %x \n %x \n %v \n", fraction,byteMin, byteMax, uintMin ,uintMax, uintDiff,uintStartMin,strStartMin )
+			fmt.Printf( "\nPart %4v \n %x \n %x \n %x \n %x \n %x \n %x \n %v \n", fraction,byteMin, byteMax, uintMin ,uintMax, uintDiff,uintStartMin,strStartMin )
 
 
 			

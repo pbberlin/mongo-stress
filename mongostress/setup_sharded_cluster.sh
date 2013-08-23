@@ -204,6 +204,24 @@ free -g
 ps aux | grep mongo
 
 
+
+
+
+
+
+single shard with ssd
+4.200 inserts/sec
+4.200 updates/sec
+400.000 reads/sec
+mongod iostat < 5%
+mongos cpu > 80%
+
+
+
+
+
+
+
 up to 40 million offers, 1 kB each, 50 GB (incl. indexes), equally distributed via salted hash of id, 
 
 insert test 1
@@ -245,3 +263,28 @@ data size < phys. RAM (sum of shards)
 
 MMS page faults, network, lock percent - all tiny
 MMS background flush  ~5 Sec		=> IO subsystem on the verge
+
+
+secondary data structures
+===================
+mongos> db.offersByLastUpdated.find({},{_id:-1})
+		{ "_id" : "1377094490::9c2dc1b1a73168afef077bd5::mgod05" }
+		{ "_id" : "1377094490::4e9eb0e4c1dab1c886e3d181::mgod03" }
+		{ "_id" : "1377094490::45ec4b999192ab50eb8aaa72::mgod03" }
+		{ "_id" : "1377094490::6b17dee4a1df216b8b7538e8::mgod04" }
+
+mongos> db.offersByLastUpdated.find({},{_id:0,op:0}).sort({lastUpdated:-1})
+ 		{ "lastUpdated" : 1377096871, "fk_id" : ObjectId("6b17dee4a1df216b8b7538e8") }
+ 
+mongos> db.offers.test.find({  "_id" : ObjectId("6b17dee4a1df216b8b7538e8") },{_id:1,lastUpdated:1,countUpdates:1,lastSeen:1})
+		{ "_id" : ObjectId("6b17dee4a1df216b8b7538e8"), "countUpdates" : 4, "lastSeen" : 1377018050, "lastUpdated" : 1377096871 }
+
+
+
+go run mongostress.go 
+
+cd /home/peter.buchmann/ws_go/src/github.com/pbberlin/g1/mongostress/
+go build  mongostress.go
+go install 
+/home/peter.buchmann/ws_go/bin/mongostress --cpuprofile p.prof
+go tool pprof mongostress p.prof
