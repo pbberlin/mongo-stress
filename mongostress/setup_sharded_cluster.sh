@@ -209,7 +209,8 @@ ps aux | grep mongo
 
 
 
-single shard with ssd
+test single shard with ssd
+===================
 4.200 inserts/sec
 4.200 updates/sec
 400.000 reads/sec
@@ -217,6 +218,24 @@ mongod iostat < 5%
 mongos cpu > 80%
 
 
+
+test two shards with ssd
+four mongos, all locally together with stress and mongod
+b30-b33
+===================
+~8.000 inserts/sec (3.750, 4.200)
+iostat ~12% +-10
+mongod cpu ~100% 
+mongos cpu ~ 40%
+stress cpu ~ 50%
+
+
+
+~14.350 updates/sec (8.000, 6.350)
+iostat ~20%  - peaks of 95% - 140 MB/s write, 33.000 writes/pers (IOPS)
+mongod cpu ~140% 
+mongos cpu ~ 70%
+stress cpu ~ 60%
 
 
 
@@ -288,3 +307,38 @@ go build  mongostress.go
 go install 
 /home/peter.buchmann/ws_go/bin/mongostress --cpuprofile p.prof
 go tool pprof mongostress p.prof
+
+
+export hnx="b33"
+scp -r  /home/peter.buchmann/ws_go/bin/mongostress	  operations@$hnx:/home/operations/stress/
+scp -r  /home/peter.buchmann/ws_go/src/github.com/pbberlin/g1/mongostress/*.html    operations@$hnx:/home/operations/stress/
+scp -r  /home/peter.buchmann/ws_go/src/github.com/pbberlin/g1/mongostress/*.ini     operations@$hnx:/home/operations/stress/
+
+
+#cd ~/stress; nohup ./mongostress 2>&1  | tee output.log | ftee fifolog &
+#cd ~/stress; nohup ./mongostress 2>&1  | tee output.log 
+cd ~/stress; nohup ./mongostress & 
+exit
+ps aux | grep mongostress
+
+
+db.adminCommand("writeBacksQueued") 
+db.runCommand({writeBacksQueued: 1})
+db.adminCommand({writeBacksQueued: 1})
+writebacklisten
+
+lvl3_repl01/b30:27018
+mongo b30.lvl.bln/admin   -u admin -p mdbpw4US
+mongo b30.lvl.bln:27018   -u admin -p mdbpw4US 
+
+After chunk migrations in a sharded cluster, there is a small window when writes could go to the wrong shard.
+The writeback listener catches (?) such misdirected writes and "relays [them] back" (=sends them back?) from the wrong mongod/shard to the right mongod/shard (via a mongos?).
+A mongos instance "lazily updates" chunk configuration changes. Possibly only after a write back?
+
+Nach chunk migrations + chunk configuration updates gibt's unter Umständen heimtückische kleine Übergangseffekte. Arbeitshypothese: nach Neustart des writing mongos geht's wieder.
+
+
+
+
+
+The writeback listener is a process that opens a long poll to relay writes back from a mongod or mongos after migrations to make sure they have not gone to the wrong server. The writeback listener sends writes back to the correct server if necessary.
